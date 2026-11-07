@@ -1,7 +1,7 @@
-# FileFinder — Project Plan
+# FF — Project Plan
 
-> Codename: `filefinder`. Final name is an open gate before remote push.
-> Status: **pre-code**. Plan rev: v1 (2026-11-07).
+> Codename retired (it8): project is named **FF**. Repo dir `FF`; binary, crate and config identifier lowercase `ff`; display identity `FF`.
+> Status: **pre-code**. Plan rev: v2 (2026-11-07).
 > This file is the living plan. Iterations append to §History; sections above are replaced in place, never deleted retroactively.
 
 A cross-platform, chromeless, GPU-rendered file browser.
@@ -29,7 +29,7 @@ Finder's job. Ghostty's feel. Honest I/O discipline.
 | Theming | Token palettes (5–8 colors). `gruvbox-dark` shipped as default. `theme = auto` follows OS dark/light. In-app cycle keybind. Custom themes = palette file in config dir. |
 | Peek (preview) | Right pane, in-window, `Space` toggles. **syntect**, lazily loaded; gruvbox `.tmTheme`; images via `image` crate → GPU texture. Head-of-file read; highlight only the visible window; large-file guard. |
 | Launch | Last-session directory restored (dir + selection + scroll). Frequent view one keybind away. |
-| Config | `~/.config/filefinder/config`, flat `key = value`. Empty file = fully usable app. Unknown keys warn, never fail. |
+| Config | `~/.config/ff/config`, flat `key = value`. Empty file = fully usable app. Unknown keys warn, never fail. |
 | Core extras | Undo journal, selection anchors, mount guardrails (never sync-stat network volumes), keymap config section, frequents view, open-with picker, optional status hairline. |
 
 **Permanent rejects (for now):** our own search index (delegated — see §3), tabs, grid view, bookmarks, webview shells (Tauri/QuickGUI family excluded from the hull).
@@ -54,8 +54,8 @@ Finder's job. Ghostty's feel. Honest I/O discipline.
 
 | Tier | Engine | All OSes? | Nature |
 |---|---|---|---|
-| instant | fsearch indexed grep (mac) | ❌ | trigram index + FSEvents; millisecond-class |
-| always-correct | **ripgrep-family libraries** (`ignore`, `grep-searcher`, `grep-regex`) | ✅ | unindexed, in-process — the ripgrep repo's own library crates, not the `rg` binary; no external install required |
+| instant | fsearch indexed grep (mac) | no | trigram index + FSEvents; millisecond-class |
+| always-correct | **ripgrep-family libraries** (`ignore`, `grep-searcher`, `grep-regex`) | yes | unindexed, in-process — the ripgrep repo's own library crates, not the `rg` binary; no external install required |
 
 `content = auto | rg | fsearch | off` — `auto` resolves to fsearch only where
 it's verified and sound, ripgrep-family libs everywhere else.
@@ -63,7 +63,7 @@ it's verified and sound, ripgrep-family libs everywhere else.
 ## 4. Architecture
 
 ```
-filefinder/
+FF/
 ├── PLAN.md
 ├── crates/
 │   ├── core/            # no egui deps — pure, testable
@@ -105,7 +105,7 @@ filefinder/
 
 ## 7. Open gates (must clear before first remote push)
 
-- [ ] **Name.** `filefinder` is a codename; rename affects binary name, config path, window class.
+- [x] **Name.** Locked (it8): `FF` everywhere — repo dir `FF`, binary/crate/config identifier `ff` (e.g. `~/.config/ff/config`), app/window identity `FF`.
 - [x] **Route re-confirmation.** **Rust + egui confirmed by user (it7).** GoRex/MyGo recorded as shipped prior art (frameless window, appearance, palette) but not chosen; the Rust-core + MyGo-shell hybrid was also considered and rejected (re-introduces a boundary GoRex deliberately avoided).
 - [x] **Provenance attestation.** Resolved (it7): `fsearch` is third-party MIT OSS, not user-owned — vendored-dependency treatment, isolated behind the `Find` trait, authorship not required.
 - [ ] **Performance gate.** Before fsearch becomes a default provider on macOS, run *our own* benchmark on our scenarios (method patterned after `fsearch demo/vs_fff.py`) to confirm the README margins; until it passes, portable providers are the floor everywhere.
@@ -114,7 +114,7 @@ filefinder/
 ## 8. Config sketch (target shape)
 
 ```
-# ~/.config/filefinder/config
+# ~/.config/ff/config
 theme                = gruvbox-dark
 preview              = peek
 preview.syntax       = true
@@ -136,3 +136,4 @@ keybind              = cmd+shift+f=jump-to-volume
 - **it5 — Forks resolved.** syntect · right-pane peek · last-session launch. v1 roadmap set.
 - **it6 — Local ground truth.** Repo scan discovered `../fsearch` (macOS whole-disk engine, MIT; self-authored hypothesis corrected in it7), `../gorex` (GoRex: Go + MyGo frameless cross-platform terminal replica — prior art for frameless/tabs/sessions/appearance), `../quickgui/my-app` (recent QuickGUI template — evaluation, not adoption). The `Find` trait became dual-provider: fsearch on mac + portable filter everywhere. §Gates added.
 - **it7 — Workflow bound + gates resolved.** Working agreement encoded in §6; plan landed as root commit `f21f4fd`. User confirmed **Rust + egui stays** (GoRex/MyGo = prior art, not the route; hybrid rejected). User classified `fsearch`: **third-party MIT OSS** — vendored-dep treatment behind `Find`, with an added rule: prefer fsearch over alternatives only where *our own* benchmark confirms README margins (new performance gate). **Ripgrep is kept** — as the ripgrep repo's *library crates* (`ignore`, `grep-searcher`, `grep-regex`), not the binary: portable, always-correct, zero-install content search that outranks nothing but also never lies. Content search became tiered (`content = auto | rg | fsearch | off`).
+- **it8 — Named: FF; de-emojified.** Project renamed per user: repo dir `filefinder` → `FF`; binary/crate/config identifier lowercase `ff`; display identity `FF`. Directory rename executed after this same commit (git travels with the dir). All emoji removed from this plan as a standing style rule — plain-words cells in any test matrix; no icons, matching the product's no-chrome aesthetic.
