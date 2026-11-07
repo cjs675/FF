@@ -34,23 +34,31 @@ Finder's job. Ghostty's feel. Honest I/O discipline.
 
 **Permanent rejects (for now):** our own search index (delegated — see §3), tabs, grid view, bookmarks, webview shells (Tauri/QuickGUI family excluded from the hull).
 
-## 3. Search: two providers behind one `Find` trait
+## 3. Search: providers behind one `Find` trait
 
-Local discovery changed this section in v1 (see §History it6):
+1. **`fsearch` (macOS, vendored dependency)** — third-party MIT OSS engine at
+   `../fsearch` (NOT user-owned; classified it7). Integration shape:
+   **in-process Rust crate** (`fsearch::Engine`) where available — but it is
+   never a hard dependency: both name search and content search degrade
+   gracefully to the portable providers. README reports vs fff on Chromium
+   509k files: name lookup 0.21 ms vs 15.4 ms, content grep 2.0 ms vs 64 ms.
+   **Preference rule (user, it7):** fsearch beats out fff-family and portable
+   providers only where *our own integrated benchmark* confirms those margins
+   on our scenarios — vendor README numbers are a claim, not a gate.
+2. **Portable name filter (all OSes)** — incremental fuzzy filter over the
+   loaded directory (SIMD scoring dependency acceptable), so Windows/Linux
+   are never second-class while fsearch keeps its macOS-only fast paths
+   (`getattrlistbulk`, FSEvents).
 
-1. **`fsearch` provider (macOS)** — the user's own engine at `../fsearch`
-   (MIT; README reports on Chromium 509k files: name lookup 0.21 ms vs fff's
-   15.4 ms; content grep 2.0 ms vs 64 ms; whole-disk index ≈ 63 MB RSS).
-   Integration shape: **as an in-process Rust crate** (`fsearch::Engine`),
-   no FFI; our app is a long-running host, a natural index owner.
-   Verify before landing: crate builds standalone; license/attribution attested (§Gates).
-2. **Portable filter (all OSes)** — incremental fuzzy filter over the loaded
-   directory (`frizbee`-style SIMD scoring acceptable as a dependency), so
-   Windows/Linux are never second-class while fsearch keeps its
-   macOS-only fast paths (`getattrlistbulk`, FSEvents).
+**Content search is tiered ("keep rg" decision, it7):**
 
-Content grep mode (`ext:`/`grep:`/`sym:` fsearch query language) is a v2 UI
-surface; the provider already supports it.
+| Tier | Engine | All OSes? | Nature |
+|---|---|---|---|
+| instant | fsearch indexed grep (mac) | ❌ | trigram index + FSEvents; millisecond-class |
+| always-correct | **ripgrep-family libraries** (`ignore`, `grep-searcher`, `grep-regex`) | ✅ | unindexed, in-process — the ripgrep repo's own library crates, not the `rg` binary; no external install required |
+
+`content = auto | rg | fsearch | off` — `auto` resolves to fsearch only where
+it's verified and sound, ripgrep-family libs everywhere else.
 
 ## 4. Architecture
 
@@ -98,8 +106,9 @@ filefinder/
 ## 7. Open gates (must clear before first remote push)
 
 - [ ] **Name.** `filefinder` is a codename; rename affects binary name, config path, window class.
-- [ ] **Route re-confirmation.** Rust+egui was chosen with these local assets visible: `../fsearch` (Rust, in-process synergy) argues for the locked route; `../gorex` (a shipped Go + MyGo frameless app, cross-platform, same egoist ecosystem as the Rex terminal the user already lives in) is the alternative-family path. Locked decision stands at Rust+egui unless re-confirmed otherwise.
-- [ ] **Provenance attestation.** `../fsearch` treated as user-owned code; confirm before we ship on it.
+- [x] **Route re-confirmation.** **Rust + egui confirmed by user (it7).** GoRex/MyGo recorded as shipped prior art (frameless window, appearance, palette) but not chosen; the Rust-core + MyGo-shell hybrid was also considered and rejected (re-introduces a boundary GoRex deliberately avoided).
+- [x] **Provenance attestation.** Resolved (it7): `fsearch` is third-party MIT OSS, not user-owned — vendored-dependency treatment, isolated behind the `Find` trait, authorship not required.
+- [ ] **Performance gate.** Before fsearch becomes a default provider on macOS, run *our own* benchmark on our scenarios (method patterned after `fsearch demo/vs_fff.py`) to confirm the README margins; until it passes, portable providers are the floor everywhere.
 - [ ] **Icon/font sourcing.** Ghostty-vibe = no icon chrome by default; decide whether Nerd Fonts, embedded SVGs (Lucide, used by GoRex under ISC — acceptable with attribution), or text-only.
 
 ## 8. Config sketch (target shape)
@@ -111,6 +120,7 @@ preview              = peek
 preview.syntax       = true
 search               = auto        # auto | portable | fsearch
 search.scope         = ~
+content              = auto        # auto | rg | fsearch | off
 launch               = session     # session | frequents | home
 keybind              = space=peek
 keybind              = cmd+f=find
@@ -124,4 +134,5 @@ keybind              = cmd+shift+f=jump-to-volume
 - **it3 — Portability required → route pivot.** Per-platform native shells eliminated (Ghostty's own shells are per-platform: Swift/AppKit, GTK4). Portable custom-GPU-shell chosen. Toolkit fork resolved: egui (immediate mode, fastest iteration, effortless under-styling) over iced / GPUI / QuickGUI. FFI problem dissolved (single language).
 - **it4 — Spec additions.** GruvBox + theme toggling; fff-style search (verified: engine escaped nvim as the standalone `fff-search` crate); peek with syntax highlighting; core extras list (undo journal, anchors, mounts, keymap, frequents, open-with, status hairline).
 - **it5 — Forks resolved.** syntect · right-pane peek · last-session launch. v1 roadmap set.
-- **it6 — Local ground truth.** Repo scan discovered `../fsearch` (user's own macOS whole-disk engine, MIT, benchmarks above), `../gorex` (GoRex: Go + MyGo frameless cross-platform terminal replica — prior art for frameless/tabs/sessions/appearance), `../quickgui/my-app` (recent QuickGUI template — evaluation, not adoption). The `Find` trait became dual-provider: fsearch on mac + portable filter everywhere. §Gates added.
+- **it6 — Local ground truth.** Repo scan discovered `../fsearch` (macOS whole-disk engine, MIT; self-authored hypothesis corrected in it7), `../gorex` (GoRex: Go + MyGo frameless cross-platform terminal replica — prior art for frameless/tabs/sessions/appearance), `../quickgui/my-app` (recent QuickGUI template — evaluation, not adoption). The `Find` trait became dual-provider: fsearch on mac + portable filter everywhere. §Gates added.
+- **it7 — Workflow bound + gates resolved.** Working agreement encoded in §6; plan landed as root commit `f21f4fd`. User confirmed **Rust + egui stays** (GoRex/MyGo = prior art, not the route; hybrid rejected). User classified `fsearch`: **third-party MIT OSS** — vendored-dep treatment behind `Find`, with an added rule: prefer fsearch over alternatives only where *our own* benchmark confirms README margins (new performance gate). **Ripgrep is kept** — as the ripgrep repo's *library crates* (`ignore`, `grep-searcher`, `grep-regex`), not the binary: portable, always-correct, zero-install content search that outranks nothing but also never lies. Content search became tiered (`content = auto | rg | fsearch | off`).
