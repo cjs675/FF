@@ -1,0 +1,10 @@
+[package]
+name = "ff-core"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+# Std-only in commit #2 by design. Third-party pieces land with their owners:
+# notify (watcher), ripgrep library crates (portable content tier),
+# fsearch crate (mac indexed tier) — PLAN.md §3 and §5.

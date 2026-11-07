@@ -1,0 +1,14 @@
+[package]
+name = "ff-app"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "ff"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.37.0"
+egui = "0.37.0"
+ff-core = { path = "../core" }
