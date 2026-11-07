@@ -1,7 +1,7 @@
 # FF — Project Plan
 
 > Codename retired (it8): project is named **FF**. Repo dir `FF`; binary, crate and config identifier lowercase `ff`; display identity `FF`.
-> Status: **pre-code**. Plan rev: v2 (2026-11-07).
+> Status: **v0 in progress** (scaffold landed `06c2c8c`). Plan rev: v3 (2026-11-07).
 > This file is the living plan. Iterations append to §History; sections above are replaced in place, never deleted retroactively.
 
 A cross-platform, chromeless, GPU-rendered file browser.
@@ -137,3 +137,4 @@ keybind              = cmd+shift+f=jump-to-volume
 - **it6 — Local ground truth.** Repo scan discovered `../fsearch` (macOS whole-disk engine, MIT; self-authored hypothesis corrected in it7), `../gorex` (GoRex: Go + MyGo frameless cross-platform terminal replica — prior art for frameless/tabs/sessions/appearance), `../quickgui/my-app` (recent QuickGUI template — evaluation, not adoption). The `Find` trait became dual-provider: fsearch on mac + portable filter everywhere. §Gates added.
 - **it7 — Workflow bound + gates resolved.** Working agreement encoded in §6; plan landed as root commit `f21f4fd`. User confirmed **Rust + egui stays** (GoRex/MyGo = prior art, not the route; hybrid rejected). User classified `fsearch`: **third-party MIT OSS** — vendored-dep treatment behind `Find`, with an added rule: prefer fsearch over alternatives only where *our own* benchmark confirms README margins (new performance gate). **Ripgrep is kept** — as the ripgrep repo's *library crates* (`ignore`, `grep-searcher`, `grep-regex`), not the binary: portable, always-correct, zero-install content search that outranks nothing but also never lies. Content search became tiered (`content = auto | rg | fsearch | off`).
 - **it8 — Named: FF; de-emojified.** Project renamed per user: repo dir `filefinder` → `FF`; binary/crate/config identifier lowercase `ff`; display identity `FF`. Directory rename executed after this same commit (git travels with the dir). All emoji removed from this plan as a standing style rule — plain-words cells in any test matrix; no icons, matching the product's no-chrome aesthetic.
+- **it9 — First code landed.** v0 scaffold committed (`06c2c8c`): `ff-core` (std-only engine types, 8 tests) + `ff-app` (egui/eframe 0.37 frameless shell, gruvbox tokens, demo tree via in-memory scanner). Plan status flipped pre-code → v0 in progress; roadmap chain unchanged. Independent read-only reporter confirmed zero deviations.
