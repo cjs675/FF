@@ -1,7 +1,7 @@
 # FF — Project Plan
 
 > Codename retired (it8): project is named **FF**. Repo dir `FF`; binary, crate and config identifier lowercase `ff`; display identity `FF`.
-> Status: **v0 in progress** (scaffold landed `06c2c8c`). Plan rev: v3 (2026-11-07).
+> Status: **v0 in progress** (engine `c1b317f`; watcher `53259b2`). Plan rev: v3 (2026-11-07).
 > This file is the living plan. Iterations append to §History; sections above are replaced in place, never deleted retroactively.
 
 A cross-platform, chromeless, GPU-rendered file browser.
