@@ -8,6 +8,9 @@ use std::path::PathBuf;
 pub enum EntryKind {
     Dir,
     File,
+    /// Listed via dirents; never followed at listing time (that would be
+    /// a stat). Descending into one is attempted and failures surface.
+    Symlink,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
