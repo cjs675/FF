@@ -506,6 +506,11 @@ impl FfShell {
             if entry.is_dir() {
                 let name = entry.name.clone();
                 self.descend(&name);
+            } else if !self.preview_open {
+                self.preview_open = true;
+                self.peek_path = None;
+                self.peek_payload = None;
+                self.peek_texture = None;
             } else {
                 let path = entry.path.clone();
                 if let Err(e) = ff_core::ops::open::open_default(&path) {
@@ -620,7 +625,9 @@ impl eframe::App for FfShell {
 
         if self.preview_open && !self.frequents_open {
             let active_path = self.display.get(self.selection).map(|e| e.path.clone());
-            if active_path != self.peek_path {
+            let needs_request = active_path != self.peek_path
+                || (self.peek_payload.is_none() && !self.peek_loading && active_path.is_some());
+            if needs_request {
                 self.peek_path = active_path.clone();
                 self.peek_payload = None;
                 self.peek_texture = None;
@@ -781,6 +788,11 @@ impl eframe::App for FfShell {
                     self.filter_focus_request = true;
                 } else if pressed(Key::Space) {
                     self.preview_open = !self.preview_open;
+                    if self.preview_open {
+                        self.peek_path = None;
+                        self.peek_payload = None;
+                        self.peek_texture = None;
+                    }
                     self.vim_count = None;
                     self.vim_pending_g = false;
                 } else if pressed(Key::ArrowUp) || (no_modifiers && pressed(Key::K)) {

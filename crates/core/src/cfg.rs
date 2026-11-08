@@ -33,7 +33,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             theme: "gruvbox-dark".into(),
-            preview: false,
+            preview: true,
             preview_syntax: true,
             search: "auto".into(),
             content: "auto".into(),
