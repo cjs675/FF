@@ -291,7 +291,7 @@ impl FfShell {
         }
     }
 
-    fn render_frequents_view(&mut self, ui: &mut Ui) {
+    fn render_frequents_view(&mut self, ui: &mut Ui, selection_moved: bool) {
         let now = ff_core::session::now_epoch_secs();
         let ranked = ff_core::session::ranked_frequents(&self.frequents, now);
         let q = self.frequents_filter.trim().to_lowercase();
@@ -319,6 +319,9 @@ impl FfShell {
                     .desired_width(f32::INFINITY)
                     .hint_text("Type to filter frequent folders... (Enter to open, Esc to close)"),
             );
+            if resp.changed() {
+                self.frequents_selection = 0;
+            }
             if self.frequents_focus_filter {
                 resp.request_focus();
                 if resp.has_focus() {
@@ -362,6 +365,22 @@ impl FfShell {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_height, total_rows, |ui, row_range| {
+                if selection_moved && self.frequents_selection < total_rows {
+                    let row_height_with_spacing = row_height + ui.spacing().item_spacing.y;
+                    let target_top = ui.max_rect().top()
+                        + (self.frequents_selection as f32 - row_range.start as f32)
+                            * row_height_with_spacing;
+                    let target_rect = egui::Rect::from_min_size(
+                        egui::pos2(ui.max_rect().min.x, target_top),
+                        egui::vec2(ui.available_width(), row_height),
+                    );
+                    ui.scroll_to_rect_animation(
+                        target_rect,
+                        None,
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
+
                 for i in row_range {
                     let entry = filtered[i];
                     let selected = i == self.frequents_selection;
@@ -372,6 +391,9 @@ impl FfShell {
                     self.pointer_over_interactive |= resp.hovered();
 
                     if selected {
+                        if selection_moved {
+                            resp.scroll_to_me(None);
+                        }
                         ui.painter().rect_filled(rect, 0.0, self.palette.sel);
                     } else if resp.hovered() {
                         ui.painter().rect_filled(rect, 0.0, self.palette.hover);
@@ -602,6 +624,9 @@ impl eframe::App for FfShell {
             }
         }
 
+        let previous_frequents_selection = self.frequents_selection;
+        let mut frequents_selection_moved = false;
+
         if self.frequents_open {
             let now = ff_core::session::now_epoch_secs();
             let ranked = ff_core::session::ranked_frequents(&self.frequents, now);
@@ -641,6 +666,7 @@ impl eframe::App for FfShell {
             } else if pressed(Key::PageUp) {
                 self.frequents_selection = self.frequents_selection.saturating_sub(10);
             }
+            frequents_selection_moved = self.frequents_selection != previous_frequents_selection;
         } else if self.open_with_modal.is_none() {
             if open_with_requested {
                 self.open_with_selected();
@@ -687,6 +713,17 @@ impl eframe::App for FfShell {
                 }
             } else if pressed(Key::Escape) {
                 self.filter.clear(); // panel auto-hides, focus drops next frame
+                self.pending_scroll = true;
+            } else if pressed(Key::ArrowUp) {
+                if self.selection > 0 {
+                    self.selection -= 1;
+                    self.pin_anchor();
+                }
+            } else if pressed(Key::ArrowDown) {
+                if self.selection + 1 < self.display.len() {
+                    self.selection += 1;
+                    self.pin_anchor();
+                }
             } else if pressed(Key::Enter) {
                 self.enter_selected();
             } else if pressed(Key::Backspace) && self.filter.is_empty() {
@@ -860,6 +897,9 @@ impl eframe::App for FfShell {
                             .desired_width(f32::INFINITY)
                             .hint_text("/  type to filter  (esc to clear)"),
                     );
+                    if resp.changed() {
+                        self.pending_scroll = true;
+                    }
                     self.filter_focused = resp.has_focus();
                     self.pointer_over_interactive |= resp.hovered();
                     if self.filter_focus_request {
@@ -873,7 +913,7 @@ impl eframe::App for FfShell {
 
         CentralPanel::default().show(ui, |ui| {
             if self.frequents_open {
-                self.render_frequents_view(ui);
+                self.render_frequents_view(ui, frequents_selection_moved);
                 return;
             }
 
@@ -900,12 +940,18 @@ impl eframe::App for FfShell {
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, total_rows, |ui, row_range| {
                     if (selection_moved || self.pending_scroll) && self.selection < total_rows {
-                        let top_y = self.selection as f32 * (row_height + ui.spacing().item_spacing.y);
+                        let row_height_with_spacing = row_height + ui.spacing().item_spacing.y;
+                        let target_top = ui.max_rect().top()
+                            + (self.selection as f32 - row_range.start as f32) * row_height_with_spacing;
                         let target_rect = egui::Rect::from_min_size(
-                            egui::pos2(ui.max_rect().min.x, ui.max_rect().min.y + top_y),
+                            egui::pos2(ui.max_rect().min.x, target_top),
                             egui::vec2(ui.available_width(), row_height),
                         );
-                        ui.scroll_to_rect(target_rect, None);
+                        ui.scroll_to_rect_animation(
+                            target_rect,
+                            None,
+                            egui::style::ScrollAnimation::none(),
+                        );
                     }
 
                     for i in row_range {
@@ -922,6 +968,9 @@ impl eframe::App for FfShell {
                         self.pointer_over_interactive |= resp.hovered();
 
                         if selected {
+                            if selection_moved || self.pending_scroll {
+                                resp.scroll_to_me(None);
+                            }
                             ui.painter().rect_filled(rect, 0.0, self.palette.sel);
                         } else if resp.hovered() {
                             ui.painter().rect_filled(rect, 0.0, self.palette.hover);
@@ -1134,6 +1183,7 @@ impl eframe::App for FfShell {
                                     );
 
                                     if is_selected {
+                                        resp.scroll_to_me(None);
                                         ui.painter().rect_filled(rect, 4.0, self.palette.sel);
                                     } else if resp.hovered() {
                                         ui.painter().rect_filled(rect, 4.0, self.palette.hover);
