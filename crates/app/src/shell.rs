@@ -6,13 +6,14 @@
 //! and session restore too: the last dir + selection come back on relaunch,
 //! delegated through the worker (reads and debounced writes both).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::{CentralPanel, Key, Panel, RichText, ScrollArea, TextEdit, Ui, ViewportCommand};
 use ff_core::cfg::{self, Config};
 use ff_core::find::{FileFinder, PortableFilter};
-use ff_core::model::Entry;
+use ff_core::model::{Entry, EntryStats};
 use ff_core::scan::{DirSource, FsEngine};
 use ff_core::session::{self, SessionState};
 
@@ -45,6 +46,8 @@ pub struct FfShell {
     last_saved: Option<SessionState>,
     /// One-shot request to scroll the restored selection into view.
     pending_scroll: bool,
+    /// Bounded in-memory cache of lazy stat results for visible rows.
+    stat_cache: HashMap<PathBuf, EntryStats>,
 }
 
 impl FfShell {
@@ -85,6 +88,7 @@ impl FfShell {
             session_path,
             last_saved: None,
             pending_scroll: false,
+            stat_cache: HashMap::new(),
         }
     }
 
@@ -174,6 +178,13 @@ impl eframe::App for FfShell {
 
         // 1. Poll the engine: drain events, reconcile, refresh listing.
         let mut listing = self.scanner.poll(&self.cwd);
+
+        for (path, stats) in self.scanner.take_stats() {
+            if self.stat_cache.len() >= 10_000 {
+                self.stat_cache.clear();
+            }
+            self.stat_cache.insert(path, stats);
+        }
 
         // 2. First arrival of the restored (or default home) state: switch
         //    to that directory instantly, within this same frame.
@@ -311,6 +322,7 @@ impl eframe::App for FfShell {
 
             let mut clicked = None;
             let mut double_clicked = None;
+            let mut missing_stats = Vec::new();
 
             ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -326,14 +338,63 @@ impl eframe::App for FfShell {
 
                     for i in row_range {
                         let entry = &self.display[i];
+                        if !self.stat_cache.contains_key(&entry.path) {
+                            missing_stats.push(entry.path.clone());
+                        }
+
                         let selected = i == self.selection;
-                        let text = RichText::new(&entry.name).color(if entry.is_dir() {
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), row_height),
+                            egui::Sense::click(),
+                        );
+                        self.pointer_over_interactive |= resp.hovered();
+
+                        if selected {
+                            ui.painter().rect_filled(rect, 0.0, self.palette.sel);
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(rect, 0.0, self.palette.hover);
+                        }
+
+                        let name_color = if entry.is_dir() {
                             self.palette.accent
                         } else {
                             self.palette.fg
-                        });
-                        let resp = ui.selectable_label(selected, text);
-                        self.pointer_over_interactive |= resp.hovered();
+                        };
+                        ui.painter().text(
+                            egui::pos2(rect.min.x + 8.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &entry.name,
+                            egui::FontId::proportional(13.0),
+                            name_color,
+                        );
+
+                        if !entry.is_dir() {
+                            let size_str = if let Some(stats) = self.stat_cache.get(&entry.path) {
+                                stats.format_size()
+                            } else {
+                                String::new()
+                            };
+                            ui.painter().text(
+                                egui::pos2(rect.max.x - 130.0, rect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                size_str,
+                                egui::FontId::monospace(11.0),
+                                self.palette.muted,
+                            );
+                        }
+
+                        let date_str = if let Some(stats) = self.stat_cache.get(&entry.path) {
+                            stats.format_mtime()
+                        } else {
+                            String::new()
+                        };
+                        ui.painter().text(
+                            egui::pos2(rect.max.x - 12.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            date_str,
+                            egui::FontId::proportional(11.0),
+                            self.palette.muted,
+                        );
 
                         if resp.clicked() {
                             clicked = Some(i);
@@ -343,6 +404,10 @@ impl eframe::App for FfShell {
                         }
                     }
                 });
+
+            if !missing_stats.is_empty() {
+                self.scanner.request_stats(missing_stats);
+            }
 
             if let Some(i) = clicked {
                 self.selection = i;

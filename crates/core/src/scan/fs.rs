@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::{DirSource, Listing, sort_entries};
-use crate::model::{Entry, EntryKind};
+use crate::model::{Entry, EntryKind, EntryStats};
 use crate::session::{self, SessionState};
 
 /// Paint this many entries immediately, unsorted, while the rest reads.
@@ -59,6 +59,11 @@ pub(crate) enum Work {
     Persist {
         state: SessionState,
     },
+    /// Request file size and modification timestamp off-thread for visible rows.
+    Stat {
+        ticket: u64,
+        paths: Vec<PathBuf>,
+    },
 }
 
 pub(crate) enum ScanEvent {
@@ -87,6 +92,11 @@ pub(crate) enum ScanEvent {
     /// default home state when no usable session file exists.
     Restored {
         state: SessionState,
+    },
+    /// Off-thread lazy stat results for requested paths.
+    Stats {
+        ticket: u64,
+        batch: Vec<(PathBuf, EntryStats)>,
     },
 }
 
@@ -185,6 +195,7 @@ fn spawn_worker(
             // (latest state, write-after Instant): re-set on every Persist,
             // so a burst of user activity coalesces into one write.
             let mut pending_persist: Option<(SessionState, Instant)> = None;
+            let mut active_ticket: u64 = 0;
 
             loop {
                 // A. Drain watcher events (non-blocking), coalesce.
@@ -234,6 +245,7 @@ fn spawn_worker(
                 match work_rx.recv_timeout(WATCH_POLL) {
                     Ok(work) => match work {
                         Work::Scan { ticket, dir } => {
+                            active_ticket = ticket;
                             let mut send_batch = |batch: Vec<Entry>| {
                                 let _ = send_event(ScanEvent::Batch {
                                     ticket,
@@ -311,6 +323,29 @@ fn spawn_worker(
                                 }
                             }
                         }
+                        Work::Stat { ticket, paths } => {
+                            // Monotonic ticket fencing: drop stale requests immediately
+                            if ticket == active_ticket {
+                                let mut batch = Vec::with_capacity(paths.len());
+                                for path in paths {
+                                    let stats = match std::fs::symlink_metadata(&path) {
+                                        Ok(meta) => {
+                                            let size = meta.len();
+                                            let mtime_secs = meta
+                                                .modified()
+                                                .ok()
+                                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                                .map(|d| d.as_secs() as i64)
+                                                .unwrap_or(0);
+                                            EntryStats { size, mtime_secs }
+                                        }
+                                        Err(_) => EntryStats::default(),
+                                    };
+                                    batch.push((path, stats));
+                                }
+                                let _ = send_event(ScanEvent::Stats { ticket, batch });
+                            }
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {} // drains happen next loop
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -341,6 +376,8 @@ pub struct FsEngine {
     /// The worker always ships exactly one `Restored` at start, so `take`
     /// returning `None` simply means "not yet arrived / already applied".
     restored: Option<SessionState>,
+    /// Off-thread stat batches delivered from the worker, buffered until taken.
+    pending_stats: Vec<(PathBuf, EntryStats)>,
 }
 
 impl FsEngine {
@@ -384,6 +421,7 @@ impl FsEngine {
             warms_inflight: HashSet::new(),
             error: None,
             restored: None,
+            pending_stats: Vec::new(),
         }
     }
 
@@ -395,6 +433,21 @@ impl FsEngine {
     /// applies it: cwd, selection anchor, scroll request).
     pub fn take_restored(&mut self) -> Option<SessionState> {
         self.restored.take()
+    }
+
+    /// Consumes any pending stat batches delivered by the background worker.
+    pub fn take_stats(&mut self) -> Vec<(PathBuf, EntryStats)> {
+        std::mem::take(&mut self.pending_stats)
+    }
+
+    /// Enqueues an off-thread stat request stamped with the current navigation ticket.
+    pub fn request_stats(&self, paths: Vec<PathBuf>) {
+        if !paths.is_empty() {
+            let _ = self.work_tx.send(Work::Stat {
+                ticket: self.ticket,
+                paths,
+            });
+        }
     }
 
     /// Hands the current session state to the worker thread; writing is
@@ -453,11 +506,15 @@ impl DirSource for FsEngine {
                     // stable across the refresh; the old list stays visible
                     // meanwhile instead of flashing empty.
                     self.cache.remove(&dir);
+                    self.pending_stats.retain(|(p, _)| p.parent() != Some(&dir));
                     if dir == self.live_dir {
                         self.ready = false;
                         self.queued = false;
                         self.error = None;
                     }
+                }
+                ScanEvent::Stats { ticket, batch } if ticket == self.ticket => {
+                    self.pending_stats.extend(batch);
                 }
                 _ => {} // stale ticket, dropped
             }
@@ -479,6 +536,7 @@ impl DirSource for FsEngine {
             self.ready = false;
             self.queued = false;
             self.error = None;
+            self.pending_stats.clear();
             let _ = self.work_tx.send(Work::Watch {
                 dir: dir.to_path_buf(),
             });
@@ -733,5 +791,38 @@ mod tests {
         }
 
         assert!(wake_count.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn stats_pipeline_delivers_file_sizes_and_mtimes() {
+        let root = temp_root("stat-pipeline");
+        let file_a = root.join("alpha.txt");
+        let file_b = root.join("beta.bin");
+        fs::write(&file_a, "hello world").unwrap();
+        fs::write(&file_b, vec![0u8; 2048]).unwrap();
+
+        let mut engine = FsEngine::launch(false);
+        let _ = wait_complete(&mut engine, &root);
+
+        engine.request_stats(vec![file_a.clone(), file_b.clone()]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stats_map = HashMap::new();
+        loop {
+            let _ = engine.poll(&root);
+            for (path, s) in engine.take_stats() {
+                stats_map.insert(path, s);
+            }
+            if stats_map.contains_key(&file_a) && stats_map.contains_key(&file_b) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "stat delivery timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert_eq!(stats_map[&file_a].size, 11);
+        assert_eq!(stats_map[&file_b].size, 2048);
+        assert!(stats_map[&file_a].mtime_secs > 0);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
