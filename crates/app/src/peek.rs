@@ -1,4 +1,4 @@
-//! Peek preview pane: lazy syntax-highlighted code, image GPU textures, and directory summary.
+//! Peek preview pane: lazy syntax-highlighted code, markdown rendering, image GPU textures, and directory summary.
 //!
 //! Follows Dieter Rams & Braun Minimalist System:
 //! - 1px stone divider (`#E2DFD7` in Braun / `#3c3836` in Gruvbox)
@@ -100,18 +100,22 @@ impl<'a> PeekView<'a> {
                         .path
                         .extension()
                         .and_then(|e| e.to_str())
-                        .unwrap_or("");
-                    let ss = get_syntax_set();
-                    let syntax_name = ss
-                        .find_syntax_by_extension(ext)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_else(|| {
-                            if ext.is_empty() {
-                                "Plain Text".to_string()
-                            } else {
-                                ext.to_uppercase()
-                            }
-                        });
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let syntax_name = if matches!(ext.as_str(), "md" | "markdown" | "mdown" | "mkdn") {
+                        "Markdown".to_string()
+                    } else {
+                        let ss = get_syntax_set();
+                        ss.find_syntax_by_extension(&ext)
+                            .map(|s| s.name.clone())
+                            .unwrap_or_else(|| {
+                                if ext.is_empty() {
+                                    "Plain Text".to_string()
+                                } else {
+                                    ext.to_uppercase()
+                                }
+                            })
+                    };
                     let hint = if *truncated {
                         Some("(head 128 KB)")
                     } else {
@@ -268,84 +272,91 @@ impl<'a> PeekView<'a> {
                 }
             }
             PeekPayload::FileText { content, .. } => {
+                let ext = self
+                    .path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let is_markdown = matches!(ext.as_str(), "md" | "markdown" | "mdown" | "mkdn");
+
                 ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        let ss = get_syntax_set();
-                        let ts = get_theme_set();
-                        let ext = self
-                            .path
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("");
-
-                        let syntax = ss
-                            .find_syntax_by_extension(ext)
-                            .or_else(|| ss.find_syntax_by_first_line(content))
-                            .unwrap_or_else(|| ss.find_syntax_plain_text());
-
-                        let is_dark = self.theme_name == "gruvbox-dark";
-                        let theme_key = if is_dark {
-                            "base16-eighties.dark"
+                        if is_markdown {
+                            render_markdown(ui, content, self.palette);
                         } else {
-                            "InspiredGitHub"
-                        };
-                        let theme = &ts.themes[theme_key];
+                            let ss = get_syntax_set();
+                            let ts = get_theme_set();
 
-                        if self.syntax_enabled {
-                            let mut highlighter = HighlightLines::new(syntax, theme);
-                            for (idx, line) in LinesWithEndings::from(content).enumerate() {
-                                let line_num = idx + 1;
-                                let mut job = LayoutJob::default();
-                                job.append(
-                                    &format!("{:>4} ", line_num),
-                                    0.0,
-                                    TextFormat {
-                                        font_id: egui::FontId::monospace(11.0),
-                                        color: self.palette.muted,
-                                        ..Default::default()
-                                    },
-                                );
-                                let ranges = highlighter
-                                    .highlight_line(line, ss)
-                                    .unwrap_or_default();
-                                for (style, text) in ranges {
-                                    let clean_text = text.trim_end_matches(&['\r', '\n'][..]);
+                            let syntax = ss
+                                .find_syntax_by_extension(&ext)
+                                .or_else(|| ss.find_syntax_by_first_line(content))
+                                .unwrap_or_else(|| ss.find_syntax_plain_text());
+
+                            let is_dark = self.theme_name == "gruvbox-dark";
+                            let theme_key = if is_dark {
+                                "base16-eighties.dark"
+                            } else {
+                                "InspiredGitHub"
+                            };
+                            let theme = &ts.themes[theme_key];
+
+                            if self.syntax_enabled {
+                                let mut highlighter = HighlightLines::new(syntax, theme);
+                                for (idx, line) in LinesWithEndings::from(content).enumerate() {
+                                    let line_num = idx + 1;
+                                    let mut job = LayoutJob::default();
                                     job.append(
-                                        clean_text,
+                                        &format!("{:>4} ", line_num),
                                         0.0,
                                         TextFormat {
                                             font_id: egui::FontId::monospace(11.0),
-                                            color: syntect_to_egui(style.foreground),
+                                            color: self.palette.muted,
                                             ..Default::default()
                                         },
                                     );
+                                    let ranges = highlighter
+                                        .highlight_line(line, ss)
+                                        .unwrap_or_default();
+                                    for (style, text) in ranges {
+                                        let clean_text = text.trim_end_matches(&['\r', '\n'][..]);
+                                        job.append(
+                                            clean_text,
+                                            0.0,
+                                            TextFormat {
+                                                font_id: egui::FontId::monospace(11.0),
+                                                color: syntect_to_egui(style.foreground),
+                                                ..Default::default()
+                                            },
+                                        );
+                                    }
+                                    ui.label(job);
                                 }
-                                ui.label(job);
-                            }
-                        } else {
-                            for (idx, line) in content.lines().enumerate() {
-                                let line_num = idx + 1;
-                                let mut job = LayoutJob::default();
-                                job.append(
-                                    &format!("{:>4} ", line_num),
-                                    0.0,
-                                    TextFormat {
-                                        font_id: egui::FontId::monospace(11.0),
-                                        color: self.palette.muted,
-                                        ..Default::default()
-                                    },
-                                );
-                                job.append(
-                                    line,
-                                    0.0,
-                                    TextFormat {
-                                        font_id: egui::FontId::monospace(11.0),
-                                        color: self.palette.fg,
-                                        ..Default::default()
-                                    },
-                                );
-                                ui.label(job);
+                            } else {
+                                for (idx, line) in content.lines().enumerate() {
+                                    let line_num = idx + 1;
+                                    let mut job = LayoutJob::default();
+                                    job.append(
+                                        &format!("{:>4} ", line_num),
+                                        0.0,
+                                        TextFormat {
+                                            font_id: egui::FontId::monospace(11.0),
+                                            color: self.palette.muted,
+                                            ..Default::default()
+                                        },
+                                    );
+                                    job.append(
+                                        line,
+                                        0.0,
+                                        TextFormat {
+                                            font_id: egui::FontId::monospace(11.0),
+                                            color: self.palette.fg,
+                                            ..Default::default()
+                                        },
+                                    );
+                                    ui.label(job);
+                                }
                             }
                         }
                     });
@@ -389,5 +400,241 @@ impl<'a> PeekView<'a> {
                 });
             }
         }
+    }
+}
+
+/// Renders parsed Markdown with clean typography conforming to Dieter Rams & Braun Minimalist System.
+pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
+    use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
+
+    let parser = Parser::new(content);
+
+    let mut current_job = LayoutJob::default();
+    current_job.wrap.max_width = ui.available_width();
+
+    let mut is_heading = None;
+    let mut is_bold = false;
+    let mut is_italic = false;
+    let mut is_code_block = false;
+    let mut code_block_text = String::new();
+    let mut list_number: Option<u64> = None;
+    let mut is_blockquote = false;
+
+    let flush_job = |ui: &mut Ui, job: &mut LayoutJob, bottom_space: f32| {
+        if !job.sections.is_empty() {
+            ui.label(std::mem::take(job));
+            job.wrap.max_width = ui.available_width();
+            if bottom_space > 0.0 {
+                ui.add_space(bottom_space);
+            }
+        }
+    };
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                flush_job(ui, &mut current_job, 4.0);
+                is_heading = Some(level);
+                ui.add_space(6.0);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                is_heading = None;
+                flush_job(ui, &mut current_job, 6.0);
+            }
+            Event::Start(Tag::Paragraph) => {
+                flush_job(ui, &mut current_job, 0.0);
+            }
+            Event::End(TagEnd::Paragraph) => {
+                if is_blockquote {
+                    if !current_job.sections.is_empty() {
+                        let job = std::mem::take(&mut current_job);
+                        current_job.wrap.max_width = ui.available_width();
+                        ui.horizontal(|ui| {
+                            let (bar_rect, _) = ui.allocate_exact_size(
+                                egui::vec2(2.0, 16.0),
+                                egui::Sense::hover(),
+                            );
+                            ui.painter().rect_filled(bar_rect, 1.0, palette.accent);
+                            ui.add_space(4.0);
+                            ui.label(job);
+                        });
+                        ui.add_space(4.0);
+                    }
+                } else {
+                    flush_job(ui, &mut current_job, 6.0);
+                }
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                flush_job(ui, &mut current_job, 2.0);
+                is_blockquote = true;
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                is_blockquote = false;
+                flush_job(ui, &mut current_job, 4.0);
+            }
+            Event::Start(Tag::CodeBlock(_)) => {
+                flush_job(ui, &mut current_job, 4.0);
+                is_code_block = true;
+                code_block_text.clear();
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                is_code_block = false;
+                let text = code_block_text.trim_end();
+                if !text.is_empty() {
+                    egui::Frame::NONE
+                        .fill(palette.hover)
+                        .inner_margin(egui::Margin {
+                            left: 8,
+                            right: 8,
+                            top: 6,
+                            bottom: 6,
+                        })
+                        .corner_radius(3.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(text)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(palette.fg),
+                            );
+                        });
+                    ui.add_space(6.0);
+                }
+                code_block_text.clear();
+            }
+            Event::Start(Tag::List(start)) => {
+                flush_job(ui, &mut current_job, 2.0);
+                list_number = start;
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_number = None;
+                flush_job(ui, &mut current_job, 4.0);
+            }
+            Event::Start(Tag::Item) => {
+                flush_job(ui, &mut current_job, 0.0);
+                let bullet = match &mut list_number {
+                    Some(num) => {
+                        let b = format!(" {:>2}. ", num);
+                        *num += 1;
+                        b
+                    }
+                    None => "  • ".to_string(),
+                };
+                current_job.append(
+                    &bullet,
+                    0.0,
+                    TextFormat {
+                        font_id: egui::FontId::monospace(11.5),
+                        color: palette.accent,
+                        ..Default::default()
+                    },
+                );
+            }
+            Event::End(TagEnd::Item) => {
+                flush_job(ui, &mut current_job, 3.0);
+            }
+            Event::Start(Tag::Strong) => is_bold = true,
+            Event::End(TagEnd::Strong) => is_bold = false,
+            Event::Start(Tag::Emphasis) => is_italic = true,
+            Event::End(TagEnd::Emphasis) => is_italic = false,
+            Event::Rule => {
+                flush_job(ui, &mut current_job, 4.0);
+                let (r, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 1.0),
+                    egui::Sense::hover(),
+                );
+                ui.painter().rect_filled(r, 0.0, palette.border);
+                ui.add_space(8.0);
+            }
+            Event::SoftBreak => {
+                current_job.append(
+                    " ",
+                    0.0,
+                    TextFormat {
+                        font_id: egui::FontId::proportional(12.0),
+                        color: palette.fg,
+                        ..Default::default()
+                    },
+                );
+            }
+            Event::HardBreak => {
+                current_job.append(
+                    "\n",
+                    0.0,
+                    TextFormat {
+                        font_id: egui::FontId::proportional(12.0),
+                        color: palette.fg,
+                        ..Default::default()
+                    },
+                );
+            }
+            Event::Code(text) => {
+                if is_code_block {
+                    code_block_text.push_str(&text);
+                } else {
+                    current_job.append(
+                        &format!(" `{text}` "),
+                        0.0,
+                        TextFormat {
+                            font_id: egui::FontId::monospace(11.0),
+                            color: palette.accent,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            Event::Text(text) => {
+                if is_code_block {
+                    code_block_text.push_str(&text);
+                } else {
+                    let (font_size, color) = if let Some(lvl) = is_heading {
+                        match lvl {
+                            HeadingLevel::H1 => (15.0, palette.accent),
+                            HeadingLevel::H2 => (13.5, palette.fg),
+                            _ => (12.5, palette.fg),
+                        }
+                    } else if is_bold {
+                        (12.5, palette.accent)
+                    } else if is_blockquote {
+                        (11.5, palette.muted)
+                    } else {
+                        (12.0, palette.fg)
+                    };
+
+                    let font_id = egui::FontId::proportional(font_size);
+                    current_job.append(
+                        &text,
+                        0.0,
+                        TextFormat {
+                            font_id,
+                            color,
+                            italics: is_italic || is_blockquote,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    flush_job(ui, &mut current_job, 4.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_markdown_parser_and_ui() {
+        let md = "# Title\n\nSome **bold** and *italic* and `code`.\n\n- item 1\n- item 2\n\n```rust\nfn main() {}\n```\n\n> quote\n\n---";
+        let palette = crate::theme::palette_for("gruvbox-dark", None);
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                render_markdown(ui, md, &palette);
+            });
+        });
+        output.textures_delta.clear();
     }
 }
