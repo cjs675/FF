@@ -26,6 +26,13 @@ impl Entry {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppOpener {
+    pub name: String,
+    pub id: String,
+    pub is_default: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EntryStats {
     pub size: u64,

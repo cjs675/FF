@@ -7,5 +7,6 @@
 pub mod cfg;
 pub mod find;
 pub mod model;
+pub mod ops;
 pub mod scan;
 pub mod session;

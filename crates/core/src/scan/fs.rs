@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::{DirSource, Listing, sort_entries};
-use crate::model::{Entry, EntryKind, EntryStats};
+use crate::model::{AppOpener, Entry, EntryKind, EntryStats};
 use crate::session::{self, SessionState};
 
 /// Paint this many entries immediately, unsorted, while the rest reads.
@@ -64,6 +64,11 @@ pub(crate) enum Work {
         ticket: u64,
         paths: Vec<PathBuf>,
     },
+    /// Enumerate candidate application openers for a given file.
+    EnumerateOpeners {
+        ticket: u64,
+        path: PathBuf,
+    },
 }
 
 pub(crate) enum ScanEvent {
@@ -97,6 +102,12 @@ pub(crate) enum ScanEvent {
     Stats {
         ticket: u64,
         batch: Vec<(PathBuf, EntryStats)>,
+    },
+    /// Candidate application openers enumerated for a path.
+    Openers {
+        ticket: u64,
+        path: PathBuf,
+        apps: Vec<AppOpener>,
     },
 }
 
@@ -346,6 +357,12 @@ fn spawn_worker(
                                 let _ = send_event(ScanEvent::Stats { ticket, batch });
                             }
                         }
+                        Work::EnumerateOpeners { ticket, path } => {
+                            if ticket == active_ticket {
+                                let apps = crate::ops::open::enumerate_openers(&path);
+                                let _ = send_event(ScanEvent::Openers { ticket, path, apps });
+                            }
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {} // drains happen next loop
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -378,6 +395,8 @@ pub struct FsEngine {
     restored: Option<SessionState>,
     /// Off-thread stat batches delivered from the worker, buffered until taken.
     pending_stats: Vec<(PathBuf, EntryStats)>,
+    /// Off-thread application opener query result.
+    pending_openers: Option<(PathBuf, Vec<AppOpener>)>,
 }
 
 impl FsEngine {
@@ -422,6 +441,7 @@ impl FsEngine {
             error: None,
             restored: None,
             pending_stats: Vec::new(),
+            pending_openers: None,
         }
     }
 
@@ -438,6 +458,19 @@ impl FsEngine {
     /// Consumes any pending stat batches delivered by the background worker.
     pub fn take_stats(&mut self) -> Vec<(PathBuf, EntryStats)> {
         std::mem::take(&mut self.pending_stats)
+    }
+
+    /// Consumes any pending application opener query results delivered by the worker.
+    pub fn take_openers(&mut self) -> Option<(PathBuf, Vec<AppOpener>)> {
+        self.pending_openers.take()
+    }
+
+    /// Enqueues an off-thread application opener enumeration query stamped with current ticket.
+    pub fn enumerate_openers(&self, path: PathBuf) {
+        let _ = self.work_tx.send(Work::EnumerateOpeners {
+            ticket: self.ticket,
+            path,
+        });
     }
 
     /// Enqueues an off-thread stat request stamped with the current navigation ticket.
@@ -516,6 +549,9 @@ impl DirSource for FsEngine {
                 ScanEvent::Stats { ticket, batch } if ticket == self.ticket => {
                     self.pending_stats.extend(batch);
                 }
+                ScanEvent::Openers { ticket, path, apps } if ticket == self.ticket => {
+                    self.pending_openers = Some((path, apps));
+                }
                 _ => {} // stale ticket, dropped
             }
         }
@@ -537,6 +573,7 @@ impl DirSource for FsEngine {
             self.queued = false;
             self.error = None;
             self.pending_stats.clear();
+            self.pending_openers = None;
             let _ = self.work_tx.send(Work::Watch {
                 dir: dir.to_path_buf(),
             });
@@ -822,6 +859,33 @@ mod tests {
         assert_eq!(stats_map[&file_a].size, 11);
         assert_eq!(stats_map[&file_b].size, 2048);
         assert!(stats_map[&file_a].mtime_secs > 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn openers_pipeline_delivers_applications() {
+        let root = temp_root("opener-pipeline");
+        let file = root.join("test.txt");
+        fs::write(&file, "hello").unwrap();
+
+        let mut engine = FsEngine::launch(false);
+        let _ = wait_complete(&mut engine, &root);
+
+        engine.enumerate_openers(file.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = engine.poll(&root);
+            if let Some((path, apps)) = engine.take_openers() {
+                assert_eq!(path, file);
+                #[cfg(target_os = "macos")]
+                assert!(!apps.is_empty());
+                let _ = apps;
+                break;
+            }
+            assert!(Instant::now() < deadline, "opener query timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
 
         let _ = fs::remove_dir_all(&root);
     }
