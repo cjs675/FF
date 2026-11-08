@@ -1,6 +1,7 @@
 //! ff — a cross-platform, chromeless file browser. PLAN.md §1: no header,
 //! no tabs, no traffic lights; the window earns its keep.
 
+mod launcher;
 mod peek;
 mod shell;
 mod theme;

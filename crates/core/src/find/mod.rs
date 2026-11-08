@@ -5,6 +5,9 @@
 //! behind the same `FileFinder` trait (v0.5 it18); nothing above this line may
 //! know which provider answered.
 
+pub mod content;
+pub use content::{search_content, ContentMatch, ContentSearchResult};
+
 use crate::model::Entry;
 
 pub trait FileFinder: Send + Sync {

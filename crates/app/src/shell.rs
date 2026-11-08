@@ -18,6 +18,7 @@ use ff_core::model::{AppOpener, Entry, EntryStats};
 use ff_core::scan::{DirSource, FileOpOutcome, FileOpRequest, FsEngine, WatcherState};
 use ff_core::session::{self, SessionState};
 
+use crate::launcher::{LauncherOutcome, LauncherState};
 use crate::theme::{self, Palette};
 
 fn truncate_middle(s: &str, max_len: usize) -> String {
@@ -124,6 +125,8 @@ pub struct FfShell {
     undo_journal: ff_core::ops::journal::UndoJournal,
     /// Modal prompt for file operations (rename, new file, new folder).
     file_op_modal: Option<FileOpModal>,
+    /// Raycast-like command palette launcher state.
+    launcher: LauncherState,
 }
 
 
@@ -226,6 +229,7 @@ impl FfShell {
             peek_texture: None,
             undo_journal: ff_core::ops::journal::UndoJournal::default(),
             file_op_modal: None,
+            launcher: LauncherState::default(),
         }
     }
 
@@ -647,6 +651,23 @@ impl eframe::App for FfShell {
         }
 
         while let Some((_ticket, path, payload)) = self.scanner.take_peek() {
+            if self.launcher.open && self.launcher.peek_path.as_ref() == Some(&path) {
+                if let ff_core::ops::peek::PeekPayload::Image { width, height, rgba, .. } = &payload {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [*width as usize, *height as usize],
+                        rgba,
+                    );
+                    self.launcher.peek_texture = Some(ctx.load_texture(
+                        "launcher_peek_image",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                } else {
+                    self.launcher.peek_texture = None;
+                }
+                self.launcher.peek_payload = Some(payload.clone());
+                self.launcher.peek_loading = false;
+            }
             if self.peek_path.as_ref() == Some(&path) {
                 if let ff_core::ops::peek::PeekPayload::Image { width, height, rgba, .. } = &payload {
                     let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -664,6 +685,15 @@ impl eframe::App for FfShell {
                 self.peek_payload = Some(payload);
                 self.peek_loading = false;
             }
+        }
+
+        if let Some((_ticket, result)) = self
+            .scanner
+            .take_content_search()
+            .filter(|(t, _)| *t == self.launcher.content_ticket)
+        {
+            self.launcher.content_results = Some(result);
+            self.launcher.content_loading = false;
         }
 
         // Process file operation outcomes from the background worker (PLAN §4 ops)
@@ -824,6 +854,11 @@ impl eframe::App for FfShell {
             ((i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift && i.key_pressed(Key::F))
                 || ((i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(Key::U))
         });
+        let launcher_toggle = ctx.input(|i| {
+            (i.modifiers.command || i.modifiers.ctrl)
+                && !i.modifiers.shift
+                && (i.key_pressed(Key::K) || i.key_pressed(Key::P))
+        });
 
         let mouse_back = ctx.input(|i| {
             i.pointer.button_clicked(PointerButton::Extra1)
@@ -859,6 +894,8 @@ impl eframe::App for FfShell {
                 self.frequents_filter.clear();
                 self.frequents_focus_filter = true;
             }
+        } else if launcher_toggle {
+            self.launcher.toggle();
         }
 
         let previous_frequents_selection = self.frequents_selection;
@@ -904,7 +941,7 @@ impl eframe::App for FfShell {
                 self.frequents_selection = self.frequents_selection.saturating_sub(10);
             }
             frequents_selection_moved = self.frequents_selection != previous_frequents_selection;
-        } else if self.open_with_modal.is_none() && self.file_op_modal.is_none() {
+        } else if self.open_with_modal.is_none() && self.file_op_modal.is_none() && !self.launcher.open {
             let undo_requested = (!self.filter_focused && ctx.input(|i| !i.modifiers.any()) && pressed(Key::U))
                 || ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && !i.modifiers.shift && i.key_pressed(Key::Z));
             let trash_requested = ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Backspace))
@@ -1876,6 +1913,109 @@ impl eframe::App for FfShell {
             }
         }
 
+        // --- Raycast-like command palette launcher & content search
+        if self.launcher.open {
+            self.pointer_over_interactive = true;
+            let scanner = &self.scanner;
+            let mut req_content = |dir: &Path, query: &str| -> u64 {
+                scanner.request_content_search(dir.to_path_buf(), query.to_string(), 50)
+            };
+            let mut req_peek = |path: &Path| {
+                scanner.request_peek(path.to_path_buf());
+            };
+            let outcome = self.launcher.render(
+                &ctx,
+                &self.cwd,
+                &self.display,
+                &self.palette,
+                &self.config.theme,
+                &mut req_content,
+                &mut req_peek,
+            );
+            match outcome {
+                LauncherOutcome::OpenPath(path) => {
+                    if path.is_dir() {
+                        self.navigate_to(path);
+                    } else if let Err(e) = ff_core::ops::open::open_default(&path) {
+                        self.status_toast = Some((
+                            format!("cannot open: {e}"),
+                            Instant::now() + Duration::from_secs(4),
+                        ));
+                    }
+                }
+                LauncherOutcome::ExecuteAction(id) => match id {
+                    "new_file" => {
+                        self.file_op_modal = Some(FileOpModal::NewFile {
+                            parent: self.cwd.clone(),
+                            input: String::new(),
+                            initial_focused: false,
+                        });
+                    }
+                    "new_folder" => {
+                        self.file_op_modal = Some(FileOpModal::NewFolder {
+                            parent: self.cwd.clone(),
+                            input: String::new(),
+                            initial_focused: false,
+                        });
+                    }
+                    "open_with" => {
+                        self.open_with_selected();
+                    }
+                    "trash" => {
+                        if let Some(entry) = self.display.get(self.selection) {
+                            let path = entry.path.clone();
+                            self.scanner.request_file_op(FileOpRequest::Trash { path });
+                        }
+                    }
+                    "undo" => {
+                        if let Some(entry) = self.undo_journal.pop() {
+                            self.status_toast = Some((
+                                format!("Undoing: {}...", entry.description),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
+                            self.scanner.request_file_op(FileOpRequest::Undo(entry.action));
+                        }
+                    }
+                    "frequents" => {
+                        self.frequents_open = true;
+                        self.frequents_selection = 0;
+                        self.frequents_filter.clear();
+                        self.frequents_focus_filter = true;
+                    }
+                    "toggle_peek" => {
+                        self.preview_open = !self.preview_open;
+                    }
+                    "cycle_theme" => {
+                        let next = if self.palette.is_dark { "braun" } else { "gruvbox-dark" };
+                        self.palette = crate::theme::palette_for(next, None);
+                        self.config.theme = next.to_string();
+                    }
+                    "copy_path" => {
+                        if let Some(entry) = self.display.get(self.selection) {
+                            ctx.copy_text(entry.path.to_string_lossy().to_string());
+                            self.status_toast = Some((
+                                "Copied path to clipboard".to_string(),
+                                Instant::now() + Duration::from_secs(2),
+                            ));
+                        }
+                    }
+                    "go_home" => {
+                        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+                            self.navigate_to(home);
+                        }
+                    }
+                    "quit" => {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    _ => {}
+                },
+                LauncherOutcome::Close => {
+                    self.launcher.open = false;
+                }
+                LauncherOutcome::None => {}
+            }
+        }
+
         // --- frameless drag: press on any non-interactive space (PLAN §2)
         let press = ctx.input(|i| i.pointer.primary_pressed());
         if press && !self.pointer_over_interactive && !ctx.egui_is_using_pointer() {
@@ -1951,6 +2091,7 @@ mod tests {
             peek_texture: None,
             undo_journal: ff_core::ops::journal::UndoJournal::default(),
             file_op_modal: None,
+            launcher: LauncherState::default(),
         };
 
         let state = SessionState {
@@ -2014,6 +2155,7 @@ mod tests {
             peek_texture: None,
             undo_journal: ff_core::ops::journal::UndoJournal::default(),
             file_op_modal: None,
+            launcher: LauncherState::default(),
         };
 
         // Navigate to dir_b
@@ -2105,6 +2247,7 @@ mod tests {
             peek_texture: None,
             undo_journal: ff_core::ops::journal::UndoJournal::default(),
             file_op_modal: None,
+            launcher: LauncherState::default(),
         };
 
         // 1. Initial selection at 0
@@ -2191,6 +2334,7 @@ mod tests {
             peek_texture: None,
             undo_journal: ff_core::ops::journal::UndoJournal::default(),
             file_op_modal: None,
+            launcher: LauncherState::default(),
         };
 
         // 1. Initial journal is empty

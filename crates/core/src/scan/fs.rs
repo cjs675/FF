@@ -89,6 +89,13 @@ pub(crate) enum Work {
     FileOp {
         op: FileOpRequest,
     },
+    /// In-process content search off-thread.
+    ContentSearch {
+        ticket: u64,
+        dir: PathBuf,
+        query: String,
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +191,11 @@ pub(crate) enum ScanEvent {
     FileOp {
         result: Result<FileOpOutcome, String>,
     },
+    /// Off-thread content search result.
+    ContentSearch {
+        ticket: u64,
+        result: crate::find::ContentSearchResult,
+    },
 }
 
 pub type RepaintWaker = Arc<dyn Fn() + Send + Sync>;
@@ -238,6 +250,7 @@ fn spawn_worker(
     waker: Option<RepaintWaker>,
     current_ticket: Arc<AtomicU64>,
     peek_ticket: Arc<AtomicU64>,
+    content_ticket: Arc<AtomicU64>,
 ) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEvent>) {
     let (work_tx, work_rx) = mpsc::channel::<Work>();
     let (event_tx, event_rx) = mpsc::channel::<ScanEvent>();
@@ -561,6 +574,14 @@ fn spawn_worker(
                             };
                             let _ = send_event(ScanEvent::FileOp { result });
                         }
+                        Work::ContentSearch { ticket, dir, query, limit } => {
+                            if ticket == content_ticket.load(Ordering::Relaxed) {
+                                let result = crate::find::search_content(&dir, &query, limit);
+                                if ticket == content_ticket.load(Ordering::Relaxed) {
+                                    let _ = send_event(ScanEvent::ContentSearch { ticket, result });
+                                }
+                            }
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {} // drains happen next loop
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -580,6 +601,7 @@ pub struct FsEngine {
     ticket: u64,
     current_ticket: Arc<AtomicU64>,
     peek_ticket: Arc<AtomicU64>,
+    content_ticket: Arc<AtomicU64>,
     live_dir: PathBuf,
     live_entries: Vec<Entry>,
     /// Authoritative listing flag: false while loading/streaming, true after
@@ -605,6 +627,8 @@ pub struct FsEngine {
     pending_peek: Option<(u64, PathBuf, crate::ops::peek::PeekPayload)>,
     /// Off-thread file operation results delivered from the worker.
     pending_file_ops: Vec<Result<FileOpOutcome, String>>,
+    /// Off-thread content search results delivered from the worker.
+    pending_content_search: Option<(u64, crate::find::ContentSearchResult)>,
     /// Watcher health / coalescing status.
     watcher_state: WatcherState,
 }
@@ -639,12 +663,14 @@ impl FsEngine {
     ) -> Self {
         let current_ticket = Arc::new(AtomicU64::new(0));
         let peek_ticket = Arc::new(AtomicU64::new(0));
+        let content_ticket = Arc::new(AtomicU64::new(0));
         let (work_tx, events) = spawn_worker(
             show_hidden,
             session_path,
             waker,
             current_ticket.clone(),
             peek_ticket.clone(),
+            content_ticket.clone(),
         );
         Self {
             work_tx,
@@ -652,6 +678,7 @@ impl FsEngine {
             ticket: 0,
             current_ticket,
             peek_ticket,
+            content_ticket,
             live_dir: PathBuf::new(),
             live_entries: Vec::new(),
             ready: false,
@@ -666,6 +693,7 @@ impl FsEngine {
             git_status: None,
             pending_peek: None,
             pending_file_ops: Vec::new(),
+            pending_content_search: None,
             watcher_state: WatcherState::Active,
         }
     }
@@ -710,6 +738,23 @@ impl FsEngine {
     /// Consumes any pending file operation results delivered by the background worker.
     pub fn take_file_ops(&mut self) -> Vec<Result<FileOpOutcome, String>> {
         std::mem::take(&mut self.pending_file_ops)
+    }
+
+    /// Consumes any pending content search results delivered by the worker.
+    pub fn take_content_search(&mut self) -> Option<(u64, crate::find::ContentSearchResult)> {
+        self.pending_content_search.take()
+    }
+
+    /// Enqueues an off-thread content grep search request under a fresh content ticket.
+    pub fn request_content_search(&self, dir: PathBuf, query: String, limit: usize) -> u64 {
+        let ticket = self.content_ticket.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.work_tx.send(Work::ContentSearch {
+            ticket,
+            dir,
+            query,
+            limit,
+        });
+        ticket
     }
 
     /// Enqueues an off-thread filesystem operation.
@@ -843,6 +888,11 @@ impl DirSource for FsEngine {
                 }
                 ScanEvent::FileOp { result, .. } => {
                     self.pending_file_ops.push(result);
+                }
+                ScanEvent::ContentSearch { ticket, result }
+                    if ticket == self.content_ticket.load(Ordering::Relaxed) =>
+                {
+                    self.pending_content_search = Some((ticket, result));
                 }
                 _ => {} // stale ticket, dropped
             }
