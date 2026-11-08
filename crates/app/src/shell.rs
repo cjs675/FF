@@ -203,19 +203,35 @@ impl eframe::App for FfShell {
                     self.selection += 1;
                     self.pin_anchor();
                 }
+            } else if pressed(Key::Home) {
+                if !self.display.is_empty() {
+                    self.selection = 0;
+                    self.pin_anchor();
+                }
+            } else if pressed(Key::End) {
+                if !self.display.is_empty() {
+                    self.selection = self.display.len() - 1;
+                    self.pin_anchor();
+                }
+            } else if pressed(Key::PageUp) {
+                self.selection = self.selection.saturating_sub(15);
+                self.pin_anchor();
+            } else if pressed(Key::PageDown) {
+                if !self.display.is_empty() {
+                    self.selection = (self.selection + 15).min(self.display.len() - 1);
+                    self.pin_anchor();
+                }
             } else if pressed(Key::Enter) {
                 self.descend_selected();
             } else if pressed(Key::Backspace) {
                 self.parent();
             }
-        } else {
-            if pressed(Key::Escape) {
-                self.filter.clear(); // panel auto-hides, focus drops next frame
-            } else if pressed(Key::Enter) {
-                self.descend_selected();
-            } else if pressed(Key::Backspace) && self.filter.is_empty() {
-                self.parent();
-            }
+        } else if pressed(Key::Escape) {
+            self.filter.clear(); // panel auto-hides, focus drops next frame
+        } else if pressed(Key::Enter) {
+            self.descend_selected();
+        } else if pressed(Key::Backspace) && self.filter.is_empty() {
+            self.parent();
         }
         let selection_moved = self.selection != previous_selection;
 
@@ -290,19 +306,28 @@ impl eframe::App for FfShell {
                 return;
             }
 
+            let row_height = ui.spacing().interact_size.y;
+            let total_rows = self.display.len();
+
+            let mut clicked = None;
+            let mut double_clicked = None;
+
             ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Row snapshot: owned values, so selection mutations don't
-                    // fight the iterator over self.display.
-                    let rows: Vec<(String, bool)> = self
-                        .display
-                        .iter()
-                        .map(|e| (e.name.clone(), e.is_dir()))
-                        .collect();
-                    for (i, (name, is_dir)) in rows.iter().enumerate() {
+                .show_rows(ui, row_height, total_rows, |ui, row_range| {
+                    if (selection_moved || self.pending_scroll) && self.selection < total_rows {
+                        let top_y = self.selection as f32 * (row_height + ui.spacing().item_spacing.y);
+                        let target_rect = egui::Rect::from_min_size(
+                            egui::pos2(ui.max_rect().min.x, ui.max_rect().min.y + top_y),
+                            egui::vec2(ui.available_width(), row_height),
+                        );
+                        ui.scroll_to_rect(target_rect, None);
+                    }
+
+                    for i in row_range {
+                        let entry = &self.display[i];
                         let selected = i == self.selection;
-                        let text = RichText::new(name.clone()).color(if *is_dir {
+                        let text = RichText::new(&entry.name).color(if entry.is_dir() {
                             self.palette.accent
                         } else {
                             self.palette.fg
@@ -311,21 +336,27 @@ impl eframe::App for FfShell {
                         self.pointer_over_interactive |= resp.hovered();
 
                         if resp.clicked() {
-                            self.selection = i;
-                            self.pin_anchor();
+                            clicked = Some(i);
                         }
                         if resp.double_clicked() {
-                            self.selection = i;
-                            if *is_dir {
-                                self.descend(name);
-                            }
-                            // file open lands with the opener work (v0.5)
-                        }
-                        if selected && (selection_moved || self.pending_scroll) {
-                            resp.scroll_to_me(None);
+                            double_clicked = Some(i);
                         }
                     }
                 });
+
+            if let Some(i) = clicked {
+                self.selection = i;
+                self.pin_anchor();
+            }
+            if let Some(i) = double_clicked {
+                self.selection = i;
+                if let Some(entry) = self.display.get(i)
+                    && entry.is_dir()
+                {
+                    let name = entry.name.clone();
+                    self.descend(&name);
+                }
+            }
         });
 
         // --- frameless drag: press on any non-interactive space (PLAN §2)
