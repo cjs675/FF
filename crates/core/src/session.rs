@@ -144,7 +144,10 @@ pub fn load(path: &Path) -> Option<SessionState> {
 /// Atomic write: tmp file in the same directory, then rename over the target.
 pub fn save(path: &Path, state: &SessionState) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if parent.is_file() {
+            let _ = fs::remove_file(parent);
+        }
+        let _ = fs::create_dir_all(parent);
     }
     let mut tmp = path.as_os_str().to_os_string();
     tmp.push(".tmp");
