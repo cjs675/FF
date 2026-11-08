@@ -385,7 +385,7 @@ impl FfShell {
         let total_rows = filtered.len();
         let mut navigate_to_path: Option<PathBuf> = None;
 
-        ScrollArea::vertical()
+        let scroll_out = ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_height, total_rows, |ui, row_range| {
                 if selection_moved && self.frequents_selection < total_rows {
@@ -434,34 +434,61 @@ impl FfShell {
                         .unwrap_or_else(|| entry.path.to_string_lossy().to_string());
                     let full_path = entry.path.to_string_lossy();
 
-                    // Name
-                    ui.painter().text(
+                    let width = rect.width();
+                    let show_path = width >= 380.0;
+                    let show_count = width >= 240.0;
+                    let right_margin = if show_count { 80.0 } else { 8.0 };
+                    let max_name_w = if show_path {
+                        130.0
+                    } else {
+                        (width - right_margin - 16.0).max(20.0)
+                    };
+                    let char_budget = (max_name_w / 7.2) as usize;
+                    let display_name = if name.chars().count() > char_budget {
+                        truncate_middle(&name, char_budget.max(6))
+                    } else {
+                        name.clone()
+                    };
+
+                    let clip_rect = egui::Rect::from_min_max(
+                        rect.min,
+                        egui::pos2(rect.min.x + 8.0 + max_name_w, rect.max.y),
+                    );
+                    ui.painter().with_clip_rect(clip_rect).text(
                         egui::pos2(rect.min.x + 8.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
-                        &name,
+                        display_name,
                         egui::FontId::proportional(13.0),
                         self.palette.accent,
                     );
 
-                    // Truncated path
-                    let path_display = truncate_middle(&full_path, 36);
-                    ui.painter().text(
-                        egui::pos2(rect.min.x + 150.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        path_display,
-                        egui::FontId::proportional(12.0),
-                        self.palette.muted,
-                    );
+                    if show_path {
+                        let path_w = (width - 150.0 - right_margin - 8.0).max(20.0);
+                        let path_budget = (path_w / 7.0) as usize;
+                        let path_display = truncate_middle(&full_path, path_budget.max(10));
+                        let path_clip = egui::Rect::from_min_max(
+                            egui::pos2(rect.min.x + 150.0, rect.min.y),
+                            egui::pos2(rect.min.x + 150.0 + path_w, rect.max.y),
+                        );
+                        ui.painter().with_clip_rect(path_clip).text(
+                            egui::pos2(rect.min.x + 150.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            path_display,
+                            egui::FontId::proportional(12.0),
+                            self.palette.muted,
+                        );
+                    }
 
-                    // Right side: visit count
-                    let count_str = format!("{} visits", entry.count);
-                    ui.painter().text(
-                        egui::pos2(rect.max.x - 12.0, rect.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        count_str,
-                        egui::FontId::monospace(11.0),
-                        self.palette.muted,
-                    );
+                    if show_count {
+                        let count_str = format!("{} visits", entry.count);
+                        ui.painter().text(
+                            egui::pos2(rect.max.x - 12.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            count_str,
+                            egui::FontId::monospace(11.0),
+                            self.palette.muted,
+                        );
+                    }
 
                     if resp.clicked() {
                         self.frequents_selection = i;
@@ -471,6 +498,15 @@ impl FfShell {
                     }
                 }
             });
+
+        let scrollbar_width = ui.spacing().scroll.bar_width + 10.0;
+        let scrollbar_rect = egui::Rect::from_min_max(
+            egui::pos2(scroll_out.inner_rect.right() - scrollbar_width, scroll_out.inner_rect.top()),
+            scroll_out.inner_rect.right_bottom(),
+        );
+        if let Some(pos) = ui.ctx().input(|i| i.pointer.hover_pos()) {
+            self.pointer_over_interactive |= scrollbar_rect.contains(pos);
+        }
 
         if let Some(target) = navigate_to_path {
             self.frequents_open = false;
@@ -1118,6 +1154,9 @@ impl eframe::App for FfShell {
                 .frame(egui::Frame::NONE.fill(self.palette.bg))
                 .show(ui, |ui| {
                     let rect = ui.max_rect();
+                    if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                        self.pointer_over_interactive |= rect.contains(pos);
+                    }
                     ui.painter().line_segment(
                         [rect.left_top(), rect.left_bottom()],
                         egui::Stroke::new(1.0, border_color),
@@ -1182,7 +1221,7 @@ impl eframe::App for FfShell {
             let mut double_clicked = None;
             let mut missing_stats = Vec::new();
 
-            ScrollArea::vertical()
+            let scroll_out = ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, total_rows, |ui, row_range| {
                     if (selection_moved || self.pending_scroll) && self.selection < total_rows {
@@ -1220,27 +1259,54 @@ impl eframe::App for FfShell {
                             ui.painter().rect_filled(rect, 0.0, self.palette.sel);
                         }
 
+                        let width = rect.width();
+                        let (show_date, show_size, right_margin) = if width >= 440.0 {
+                            (true, true, 210.0)
+                        } else if width >= 280.0 {
+                            (false, true, 76.0)
+                        } else {
+                            (false, false, 8.0)
+                        };
+
+                        let max_name_w = (width - right_margin - 12.0).max(20.0);
+                        let char_budget = (max_name_w / 7.2) as usize;
+                        let display_name = if entry.name.chars().count() > char_budget {
+                            truncate_middle(&entry.name, char_budget.max(6))
+                        } else {
+                            entry.name.clone()
+                        };
+
+                        let clip_rect = egui::Rect::from_min_max(
+                            rect.min,
+                            egui::pos2(rect.min.x + 8.0 + max_name_w, rect.max.y),
+                        );
+
                         let name_color = if entry.is_dir() {
                             self.palette.accent
                         } else {
                             self.palette.fg
                         };
-                        ui.painter().text(
+                        ui.painter().with_clip_rect(clip_rect).text(
                             egui::pos2(rect.min.x + 8.0, rect.center().y),
                             egui::Align2::LEFT_CENTER,
-                            &entry.name,
+                            display_name,
                             egui::FontId::proportional(13.0),
                             name_color,
                         );
 
-                        if !entry.is_dir() {
+                        if show_size && !entry.is_dir() {
                             let size_str = if let Some(stats) = self.stat_cache.get(&entry.path) {
                                 stats.format_size()
                             } else {
                                 String::new()
                             };
+                            let size_x = if show_date {
+                                rect.max.x - 130.0
+                            } else {
+                                rect.max.x - 12.0
+                            };
                             ui.painter().text(
-                                egui::pos2(rect.max.x - 130.0, rect.center().y),
+                                egui::pos2(size_x, rect.center().y),
                                 egui::Align2::RIGHT_CENTER,
                                 size_str,
                                 egui::FontId::monospace(11.0),
@@ -1248,18 +1314,20 @@ impl eframe::App for FfShell {
                             );
                         }
 
-                        let date_str = if let Some(stats) = self.stat_cache.get(&entry.path) {
-                            stats.format_mtime()
-                        } else {
-                            String::new()
-                        };
-                        ui.painter().text(
-                            egui::pos2(rect.max.x - 12.0, rect.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            date_str,
-                            egui::FontId::proportional(11.0),
-                            self.palette.muted,
-                        );
+                        if show_date {
+                            let date_str = if let Some(stats) = self.stat_cache.get(&entry.path) {
+                                stats.format_mtime()
+                            } else {
+                                String::new()
+                            };
+                            ui.painter().text(
+                                egui::pos2(rect.max.x - 12.0, rect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                date_str,
+                                egui::FontId::proportional(11.0),
+                                self.palette.muted,
+                            );
+                        }
 
                         if resp.clicked() {
                             clicked = Some(i);
@@ -1269,6 +1337,15 @@ impl eframe::App for FfShell {
                         }
                     }
                 });
+
+            let scrollbar_width = ui.spacing().scroll.bar_width + 10.0;
+            let scrollbar_rect = egui::Rect::from_min_max(
+                egui::pos2(scroll_out.inner_rect.right() - scrollbar_width, scroll_out.inner_rect.top()),
+                scroll_out.inner_rect.right_bottom(),
+            );
+            if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                self.pointer_over_interactive |= scrollbar_rect.contains(pos);
+            }
 
             if !missing_stats.is_empty() {
                 self.scanner.request_stats(missing_stats);
@@ -1479,7 +1556,7 @@ impl eframe::App for FfShell {
 
         // --- frameless drag: press on any non-interactive space (PLAN §2)
         let press = ctx.input(|i| i.pointer.primary_pressed());
-        if press && !self.pointer_over_interactive {
+        if press && !self.pointer_over_interactive && !ctx.egui_is_using_pointer() {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
 

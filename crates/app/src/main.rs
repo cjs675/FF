@@ -11,7 +11,7 @@ fn main() -> eframe::Result<()> {
             .with_title("ff")
             .with_decorations(false)
             .with_inner_size([860.0, 520.0])
-            .with_min_inner_size([560.0, 320.0]),
+            .with_min_inner_size([640.0, 360.0]),
         ..Default::default()
     };
 
