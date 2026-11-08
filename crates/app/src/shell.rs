@@ -77,7 +77,15 @@ pub struct FfShell {
     open_with_modal: Option<OpenWithModal>,
     /// Status hairline error toast: (message, expires_at).
     status_toast: Option<(String, Instant)>,
+    /// Frequents view state: tracked visit directories and modal toggle.
+    pub frequents: Vec<ff_core::session::FrequentEntry>,
+    pub frequents_open: bool,
+    pub frequents_selection: usize,
+    pub frequents_filter: String,
+    pub frequents_focus_filter: bool,
+    last_visited_cwd: Option<PathBuf>,
 }
+
 
 impl FfShell {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -158,8 +166,15 @@ impl FfShell {
             stat_cache: HashMap::new(),
             open_with_modal: None,
             status_toast: None,
+            frequents: Vec::new(),
+            frequents_open: false,
+            frequents_selection: 0,
+            frequents_filter: String::new(),
+            frequents_focus_filter: false,
+            last_visited_cwd: None,
         }
     }
+
 
     /// Applies the worker's restored state: navigate to the last dir, keep
     /// the selection by NAME (the anchor machinery re-seats the index once
@@ -167,11 +182,36 @@ impl FfShell {
     /// is marked as already persisted to avoid a redundant immediate write.
     fn apply_restore(&mut self, state: SessionState) {
         self.last_saved = Some(state.clone());
-        self.cwd = state.cwd;
+        self.frequents = state.frequents;
+
+        match self.config.launch {
+            cfg::Launch::Home => {
+                self.cwd = session::home_dir();
+                self.anchor = None;
+            }
+            cfg::Launch::Frequents => {
+                self.cwd = state.cwd;
+                self.anchor = state.selection;
+                self.frequents_open = true;
+                self.frequents_focus_filter = true;
+            }
+            cfg::Launch::Session => {
+                self.cwd = state.cwd;
+                self.anchor = state.selection;
+            }
+        }
+
         self.entries.clear();
         self.display.clear();
         self.selection = 0;
-        self.anchor = state.selection;
+        self.filter.clear();
+        self.pending_scroll = true;
+    }
+
+    fn navigate_to(&mut self, target: PathBuf) {
+        self.cwd = target;
+        self.selection = 0;
+        self.anchor = None;
         self.filter.clear();
         self.pending_scroll = true;
     }
@@ -192,6 +232,151 @@ impl FfShell {
                 self.filter.clear();
             }
     }
+
+    fn render_frequents_view(&mut self, ui: &mut Ui) {
+        let now = ff_core::session::now_epoch_secs();
+        let ranked = ff_core::session::ranked_frequents(&self.frequents, now);
+        let q = self.frequents_filter.trim().to_lowercase();
+        let filtered: Vec<&ff_core::session::FrequentEntry> = ranked
+            .iter()
+            .filter(|f| {
+                if q.is_empty() {
+                    true
+                } else {
+                    f.path.to_string_lossy().to_lowercase().contains(&q)
+                }
+            })
+            .collect();
+
+        // Top search / filter input
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("FREQUENTS")
+                    .monospace()
+                    .size(11.0)
+                    .color(self.palette.green),
+            );
+            let resp = ui.add(
+                TextEdit::singleline(&mut self.frequents_filter)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Type to filter frequent folders... (Enter to open, Esc to close)"),
+            );
+            if self.frequents_focus_filter {
+                resp.request_focus();
+                if resp.has_focus() {
+                    self.frequents_focus_filter = false;
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        let (hairline_rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 1.0),
+            egui::Sense::hover(),
+        );
+        ui.painter().rect_filled(hairline_rect, 0.0, self.palette.border);
+        ui.add_space(4.0);
+
+        if filtered.is_empty() {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(if self.frequents.is_empty() {
+                        "No frequent folders recorded yet. Browse directories to populate."
+                    } else {
+                        "No frequent folders match filter."
+                    })
+                    .color(self.palette.muted)
+                    .size(13.0),
+                );
+            });
+            return;
+        }
+
+        if self.frequents_selection >= filtered.len() {
+            self.frequents_selection = filtered.len().saturating_sub(1);
+        }
+
+        let row_height = ui.spacing().interact_size.y;
+        let total_rows = filtered.len();
+        let mut navigate_to_path: Option<PathBuf> = None;
+
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, row_height, total_rows, |ui, row_range| {
+                for i in row_range {
+                    let entry = filtered[i];
+                    let selected = i == self.frequents_selection;
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Sense::click(),
+                    );
+                    self.pointer_over_interactive |= resp.hovered();
+
+                    if selected {
+                        ui.painter().rect_filled(rect, 0.0, self.palette.sel);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, 0.0, self.palette.hover);
+                    }
+
+                    // 1px hairline divider on row bottom
+                    let div_rect = egui::Rect::from_min_max(
+                        egui::pos2(rect.min.x, rect.max.y - 1.0),
+                        egui::pos2(rect.max.x, rect.max.y),
+                    );
+                    ui.painter().rect_filled(div_rect, 0.0, self.palette.border);
+
+                    let name = entry
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| entry.path.to_string_lossy().to_string());
+                    let full_path = entry.path.to_string_lossy();
+
+                    // Name
+                    ui.painter().text(
+                        egui::pos2(rect.min.x + 8.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        &name,
+                        egui::FontId::proportional(13.0),
+                        self.palette.accent,
+                    );
+
+                    // Truncated path
+                    let path_display = truncate_middle(&full_path, 36);
+                    ui.painter().text(
+                        egui::pos2(rect.min.x + 150.0, rect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        path_display,
+                        egui::FontId::proportional(12.0),
+                        self.palette.muted,
+                    );
+
+                    // Right side: visit count
+                    let count_str = format!("{} visits", entry.count);
+                    ui.painter().text(
+                        egui::pos2(rect.max.x - 12.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        count_str,
+                        egui::FontId::monospace(11.0),
+                        self.palette.muted,
+                    );
+
+                    if resp.clicked() {
+                        self.frequents_selection = i;
+                    }
+                    if resp.double_clicked() {
+                        navigate_to_path = Some(entry.path.clone());
+                    }
+                }
+            });
+
+        if let Some(target) = navigate_to_path {
+            self.frequents_open = false;
+            self.navigate_to(target);
+        }
+    }
+
 
     /// Selection change => re-pin the anchor to the entry now selected.
     fn pin_anchor(&mut self) {
@@ -256,10 +441,12 @@ impl FfShell {
             let state = SessionState {
                 cwd: self.cwd.clone(),
                 selection: self.anchor.clone(),
+                frequents: self.frequents.clone(),
             };
             let _ = session::save(path, &state);
         }
     }
+
 }
 
 impl Drop for FfShell {
@@ -301,6 +488,11 @@ impl eframe::App for FfShell {
         self.entries = listing.entries;
         self.listing_loading = !listing.complete;
 
+        if !self.cwd.as_os_str().is_empty() && self.last_visited_cwd.as_ref() != Some(&self.cwd) {
+            session::record_visit(&mut self.frequents, &self.cwd, session::now_epoch_secs());
+            self.last_visited_cwd = Some(self.cwd.clone());
+        }
+
         // 2. Recompute the filtered view, then re-seat the anchor.
         self.display = self.finder.filter(&self.entries, &self.filter);
         self.remap_selection();
@@ -311,8 +503,60 @@ impl eframe::App for FfShell {
             (i.modifiers.command && i.key_pressed(Key::O))
                 || (i.modifiers.alt && i.key_pressed(Key::Enter))
         });
+        let frequents_toggle = ctx.input(|i| {
+            ((i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift && i.key_pressed(Key::F))
+                || ((i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(Key::U))
+        });
 
-        if self.open_with_modal.is_none() {
+        if frequents_toggle {
+            self.frequents_open = !self.frequents_open;
+            if self.frequents_open {
+                self.frequents_selection = 0;
+                self.frequents_filter.clear();
+                self.frequents_focus_filter = true;
+            }
+        }
+
+        if self.frequents_open {
+            let now = ff_core::session::now_epoch_secs();
+            let ranked = ff_core::session::ranked_frequents(&self.frequents, now);
+            let q = self.frequents_filter.trim().to_lowercase();
+            let filtered_len = ranked
+                .iter()
+                .filter(|f| q.is_empty() || f.path.to_string_lossy().to_lowercase().contains(&q))
+                .count();
+
+            if pressed(Key::Escape) {
+                self.frequents_open = false;
+            } else if pressed(Key::Enter) {
+                let filtered: Vec<PathBuf> = ranked
+                    .iter()
+                    .filter(|f| q.is_empty() || f.path.to_string_lossy().to_lowercase().contains(&q))
+                    .map(|f| f.path.clone())
+                    .collect();
+                if let Some(target) = filtered.get(self.frequents_selection) {
+                    let target = target.clone();
+                    self.frequents_open = false;
+                    self.navigate_to(target);
+                }
+            } else if pressed(Key::ArrowDown) {
+                if self.frequents_selection + 1 < filtered_len {
+                    self.frequents_selection += 1;
+                }
+            } else if pressed(Key::ArrowUp) {
+                if self.frequents_selection > 0 {
+                    self.frequents_selection -= 1;
+                }
+            } else if pressed(Key::Home) {
+                self.frequents_selection = 0;
+            } else if pressed(Key::End) {
+                self.frequents_selection = filtered_len.saturating_sub(1);
+            } else if pressed(Key::PageDown) {
+                self.frequents_selection = (self.frequents_selection + 10).min(filtered_len.saturating_sub(1));
+            } else if pressed(Key::PageUp) {
+                self.frequents_selection = self.frequents_selection.saturating_sub(10);
+            }
+        } else if self.open_with_modal.is_none() {
             if open_with_requested {
                 self.open_with_selected();
             } else if !self.filter_focused {
@@ -366,11 +610,13 @@ impl eframe::App for FfShell {
         let current = SessionState {
             cwd: self.cwd.clone(),
             selection: self.display.get(self.selection).map(|e| e.name.clone()),
+            frequents: self.frequents.clone(),
         };
         if self.last_saved.as_ref() != Some(&current) {
             self.scanner.persist(current.clone());
             self.last_saved = Some(current);
         }
+
 
         self.pointer_over_interactive = false;
 
@@ -411,6 +657,25 @@ impl eframe::App for FfShell {
                 );
 
                 let center_y = rect.center().y;
+
+                if self.frequents_open {
+                    painter.circle_filled(egui::pos2(rect.min.x + 12.0, center_y), 3.0, self.palette.green);
+                    painter.text(
+                        egui::pos2(rect.min.x + 22.0, center_y),
+                        egui::Align2::LEFT_CENTER,
+                        format!("FREQUENTS  |  {} folders", self.frequents.len()),
+                        egui::FontId::monospace(11.0),
+                        self.palette.muted,
+                    );
+                    painter.text(
+                        egui::pos2(rect.max.x - 12.0, center_y),
+                        egui::Align2::RIGHT_CENTER,
+                        "Enter: open  |  Esc: return",
+                        egui::FontId::monospace(11.0),
+                        self.palette.muted,
+                    );
+                    return;
+                }
 
                 // Priority 1: Left segment (item count and shallow file size)
                 let dir_size_str = match self.scanner.dir_size() {
@@ -496,7 +761,7 @@ impl eframe::App for FfShell {
             });
 
         // --- bottom: filter line, only while summoned or holding text
-        if self.filter_focus_request || self.filter_focused || !self.filter.is_empty() {
+        if !self.frequents_open && (self.filter_focus_request || self.filter_focused || !self.filter.is_empty()) {
             Panel::bottom("filter")
                 .show_separator_line(false)
                 .show(ui, |ui| {
@@ -517,6 +782,11 @@ impl eframe::App for FfShell {
         }
 
         CentralPanel::default().show(ui, |ui| {
+            if self.frequents_open {
+                self.render_frequents_view(ui);
+                return;
+            }
+
             if self.display.is_empty() && !self.listing_loading {
                 ui.label(
                     RichText::new(if self.filter.is_empty() {
@@ -844,3 +1114,71 @@ impl eframe::App for FfShell {
         self.save_session();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_middle() {
+        assert_eq!(truncate_middle("short", 10), "short");
+        assert_eq!(truncate_middle("hello world", 5), "h...d");
+        assert_eq!(truncate_middle("abcdefghij", 7), "ab...ij");
+    }
+
+    #[test]
+    fn test_apply_restore_modes() {
+        let mut shell = FfShell {
+            config: Config {
+                launch: cfg::Launch::Frequents,
+                ..Config::default()
+            },
+            config_warnings: Vec::new(),
+            palette: crate::theme::palette_for("gruvbox-dark", None),
+            scanner: FsEngine::launch(false),
+            finder: Box::new(ff_core::find::PortableFilter),
+            cwd: PathBuf::new(),
+            entries: Vec::new(),
+            display: Vec::new(),
+            anchor: None,
+            filter: String::new(),
+            selection: 0,
+            listing_loading: true,
+            filter_focus_request: false,
+            filter_focused: false,
+            pointer_over_interactive: false,
+            session_path: None,
+            last_saved: None,
+            pending_scroll: false,
+            stat_cache: HashMap::new(),
+            open_with_modal: None,
+            status_toast: None,
+            frequents: Vec::new(),
+            frequents_open: false,
+            frequents_selection: 0,
+            frequents_filter: String::new(),
+            frequents_focus_filter: false,
+            last_visited_cwd: None,
+        };
+
+        let state = SessionState {
+            cwd: PathBuf::from("/test/dir"),
+            selection: Some("file.rs".into()),
+            frequents: vec![ff_core::session::FrequentEntry {
+                path: PathBuf::from("/test/dir"),
+                count: 1,
+                last_visited: 1000,
+            }],
+        };
+
+        shell.apply_restore(state.clone());
+        assert!(shell.frequents_open);
+        assert_eq!(shell.frequents.len(), 1);
+
+        shell.navigate_to(PathBuf::from("/new/path"));
+        assert_eq!(shell.cwd, PathBuf::from("/new/path"));
+        assert_eq!(shell.selection, 0);
+        assert!(shell.pending_scroll);
+    }
+}
+

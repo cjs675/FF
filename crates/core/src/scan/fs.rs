@@ -903,6 +903,7 @@ mod tests {
             &SessionState {
                 cwd: listed.clone(),
                 selection: Some("b.txt".into()),
+                frequents: Vec::new(),
             },
         )
         .unwrap();
@@ -921,7 +922,8 @@ mod tests {
             restored,
             SessionState {
                 cwd: listed.clone(),
-                selection: Some("b.txt".into())
+                selection: Some("b.txt".into()),
+                frequents: Vec::new(),
             }
         );
 
@@ -933,6 +935,7 @@ mod tests {
         let next = SessionState {
             cwd: listed.clone(),
             selection: Some("a.txt".into()),
+            frequents: Vec::new(),
         };
         engine.persist(next.clone());
         let deadline = Instant::now() + Duration::from_secs(5);
