@@ -393,7 +393,7 @@ impl LauncherState {
             .resizable(false)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, -20.0))
-            .fixed_size(egui::vec2(720.0, 460.0))
+            .fixed_size(egui::vec2(640.0, 350.0))
             .frame(
                 egui::Frame::NONE
                     .fill(palette.surface)
@@ -405,7 +405,7 @@ impl LauncherState {
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
 
                 // --- TOP SEARCH BAR ---
-                let header_height = 48.0;
+                let header_height = 38.0;
                 let header_out = ui.allocate_ui(egui::vec2(ui.available_width(), header_height), |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.add_space(12.0);
@@ -433,7 +433,8 @@ impl LauncherState {
                             let btn = egui::Button::new(
                                 RichText::new(label)
                                     .color(text_color)
-                                    .size(11.0)
+                                    .size(10.5)
+                                    .monospace()
                                     .strong(),
                             )
                             .fill(fill_color)
@@ -463,10 +464,10 @@ impl LauncherState {
 
                         let edit = TextEdit::singleline(&mut self.query)
                             .hint_text(placeholder)
-                            .font(egui::FontId::proportional(14.0))
+                            .font(egui::FontId::monospace(13.0))
                             .text_color(palette.fg)
                             .frame(egui::Frame::NONE)
-                            .desired_width(ui.available_width() - 50.0);
+                            .desired_width(ui.available_width() - 48.0);
 
                         let resp = ui.add(edit);
                         if self.focus_input {
@@ -480,7 +481,7 @@ impl LauncherState {
                             ui.label(
                                 RichText::new("esc")
                                     .color(palette.muted)
-                                    .size(11.0)
+                                    .size(10.5)
                                     .monospace(),
                             );
                         });
@@ -498,7 +499,7 @@ impl LauncherState {
                 );
 
                 // --- SPLIT VIEW: RESULTS (52%) + PREVIEW (48%) ---
-                let split_height = 383.0;
+                let split_height = 286.0;
                 let full_w = ui.available_width();
                 let left_w = (full_w * 0.52).round();
                 let right_w = full_w - left_w;
@@ -525,13 +526,14 @@ impl LauncherState {
                                                         ui.label(
                                                             RichText::new("No matching files found")
                                                                 .color(palette.muted)
-                                                                .size(12.0),
+                                                                .size(11.5)
+                                                                .monospace(),
                                                         );
                                                     });
                                                 } else {
                                                     for (i, entry) in matching_files.iter().enumerate() {
                                                         let is_selected = i == self.selection;
-                                                        let row_h = 30.0;
+                                                        let row_h = 24.0;
                                                         let (rect, resp) = ui.allocate_exact_size(
                                                             egui::vec2(ui.available_width(), row_h),
                                                             egui::Sense::click(),
@@ -555,7 +557,7 @@ impl LauncherState {
                                                             palette.fg
                                                         };
 
-                                                        let max_chars = ((rect.width() - 20.0) / 7.5).max(10.0) as usize;
+                                                        let max_chars = ((rect.width() - 20.0) / 7.2).max(8.0) as usize;
                                                         let text_to_draw = if display_name.chars().count() > max_chars {
                                                             crate::shell::truncate_middle(&display_name, max_chars)
                                                         } else {
@@ -566,7 +568,7 @@ impl LauncherState {
                                                             egui::pos2(rect.min.x + 10.0, rect.center().y),
                                                             egui::Align2::LEFT_CENTER,
                                                             &text_to_draw,
-                                                            egui::FontId::proportional(12.5),
+                                                            egui::FontId::monospace(12.0),
                                                             name_color,
                                                         );
 
@@ -585,7 +587,8 @@ impl LauncherState {
                                                     ui.label(
                                                         RichText::new("Searching content...")
                                                             .color(palette.accent)
-                                                            .size(12.0),
+                                                            .size(11.5)
+                                                            .monospace(),
                                                     );
                                                 });
                                             } else if let Some(results) = &self.content_results {
@@ -595,13 +598,14 @@ impl LauncherState {
                                                         ui.label(
                                                             RichText::new("No content matches found")
                                                                 .color(palette.muted)
-                                                                .size(12.0),
+                                                                .size(11.5)
+                                                                .monospace(),
                                                         );
                                                     });
                                                 } else {
                                                     for (i, mat) in results.matches.iter().enumerate() {
                                                         let is_selected = i == self.selection;
-                                                        let row_h = 44.0;
+                                                        let row_h = 36.0;
                                                         let (rect, resp) = ui.allocate_exact_size(
                                                             egui::vec2(ui.available_width(), row_h),
                                                             egui::Sense::click(),
@@ -623,24 +627,24 @@ impl LauncherState {
                                                         let row_painter = ui.painter().with_clip_rect(rect);
 
                                                         // Top row: Filename
-                                                        let max_name_chars = ((rect.width() - 20.0) / 7.5).max(10.0) as usize;
+                                                        let max_name_chars = ((rect.width() - 20.0) / 7.2).max(8.0) as usize;
                                                         let name_to_draw = if file_name.chars().count() > max_name_chars {
                                                             crate::shell::truncate_middle(&file_name, max_name_chars)
                                                         } else {
                                                             file_name
                                                         };
                                                         row_painter.text(
-                                                            egui::pos2(rect.min.x + 10.0, rect.min.y + 12.0),
+                                                            egui::pos2(rect.min.x + 10.0, rect.min.y + 10.0),
                                                             egui::Align2::LEFT_CENTER,
                                                             &name_to_draw,
-                                                            egui::FontId::proportional(12.0),
+                                                            egui::FontId::monospace(11.5),
                                                             palette.fg,
                                                         );
 
                                                         // Bottom row: L{line}: {snippet}
                                                         let line_badge = format!("L{}: ", mat.line_number);
                                                         let snippet = &mat.line_text;
-                                                        let max_len = 38;
+                                                        let max_len = 34;
                                                         let display_snippet = if snippet.chars().count() > max_len {
                                                             format!("{}...", &snippet[..snippet.char_indices().nth(max_len).map(|(idx, _)| idx).unwrap_or(snippet.len())])
                                                         } else {
@@ -648,10 +652,10 @@ impl LauncherState {
                                                         };
 
                                                         row_painter.text(
-                                                            egui::pos2(rect.min.x + 10.0, rect.min.y + 28.0),
+                                                            egui::pos2(rect.min.x + 10.0, rect.min.y + 24.0),
                                                             egui::Align2::LEFT_CENTER,
                                                             format!("{line_badge}{display_snippet}"),
-                                                            egui::FontId::monospace(10.5),
+                                                            egui::FontId::monospace(10.0),
                                                             palette.muted,
                                                         );
 
@@ -668,7 +672,8 @@ impl LauncherState {
                                                     ui.label(
                                                         RichText::new("Type query to grep across files")
                                                             .color(palette.muted)
-                                                            .size(12.0),
+                                                            .size(11.5)
+                                                            .monospace(),
                                                     );
                                                 });
                                             }
@@ -680,13 +685,14 @@ impl LauncherState {
                                                     ui.label(
                                                         RichText::new("No matching actions")
                                                             .color(palette.muted)
-                                                            .size(12.0),
+                                                            .size(11.5)
+                                                            .monospace(),
                                                     );
                                                 });
                                             } else {
                                                 for (i, action) in filtered_actions.iter().enumerate() {
                                                     let is_selected = i == self.selection;
-                                                    let row_h = 32.0;
+                                                    let row_h = 24.0;
                                                     let (rect, resp) = ui.allocate_exact_size(
                                                         egui::vec2(ui.available_width(), row_h),
                                                         egui::Sense::click(),
@@ -706,7 +712,7 @@ impl LauncherState {
                                                         egui::pos2(rect.min.x + 10.0, rect.center().y),
                                                         egui::Align2::LEFT_CENTER,
                                                         action.title,
-                                                        egui::FontId::proportional(12.5),
+                                                        egui::FontId::monospace(11.5),
                                                         palette.fg,
                                                     );
 
@@ -715,7 +721,7 @@ impl LauncherState {
                                                         egui::pos2(rect.max.x - 70.0, rect.center().y),
                                                         egui::Align2::RIGHT_CENTER,
                                                         action.category,
-                                                        egui::FontId::proportional(10.5),
+                                                        egui::FontId::monospace(9.5),
                                                         palette.label,
                                                     );
 
@@ -759,10 +765,10 @@ impl LauncherState {
                             |ui| {
                                 egui::Frame::NONE
                                     .inner_margin(egui::Margin {
-                                        left: 12,
-                                        right: 12,
-                                        top: 10,
-                                        bottom: 8,
+                                        left: 10,
+                                        right: 10,
+                                        top: 8,
+                                        bottom: 6,
                                     })
                                     .show(ui, |ui| {
                                         if let Some(path) = &self.peek_path {
@@ -777,19 +783,21 @@ impl LauncherState {
                                             };
                                             peek_view.show(ui);
                                         } else {
-                                            ui.add_space(80.0);
+                                            ui.add_space(60.0);
                                             ui.vertical_centered(|ui| {
                                                 ui.label(
                                                     RichText::new("Raycast Launcher")
                                                         .color(palette.muted)
-                                                        .size(14.0)
+                                                        .size(13.0)
+                                                        .monospace()
                                                         .strong(),
                                                 );
                                                 ui.add_space(4.0);
                                                 ui.label(
                                                     RichText::new("Arrow through items to live preview")
                                                         .color(palette.label)
-                                                        .size(11.5),
+                                                        .size(11.0)
+                                                        .monospace(),
                                                 );
                                             });
                                         }
@@ -800,14 +808,14 @@ impl LauncherState {
                 );
 
                 // --- FOOTER BAR ---
-                let footer_height = 28.0;
+                let footer_height = 24.0;
                 let footer_out = ui.allocate_ui(egui::vec2(ui.available_width(), footer_height), |ui| {
                     ui.horizontal_centered(|ui| {
                         ui.add_space(10.0);
                         ui.label(
                             RichText::new("↵ Open  |  ⇥ Mode  |  ↑↓ Navigate  |  esc Close")
                                 .color(palette.muted)
-                                .size(11.0)
+                                .size(10.5)
                                 .monospace(),
                         );
 

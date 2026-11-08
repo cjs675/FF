@@ -153,8 +153,9 @@ impl<'a> PeekView<'a> {
             ui.add_space(2.0);
             ui.label(
                 RichText::new(&name)
+                    .monospace()
                     .strong()
-                    .size(13.5)
+                    .size(13.0)
                     .color(self.palette.accent),
             );
             ui.add_space(3.0);
@@ -185,6 +186,7 @@ impl<'a> PeekView<'a> {
             ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new("Loading preview...")
+                        .monospace()
                         .color(self.palette.muted)
                         .size(12.0),
                 );
@@ -197,6 +199,7 @@ impl<'a> PeekView<'a> {
             ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new("Select an item to preview")
+                        .monospace()
                         .color(self.palette.muted)
                         .size(12.0),
                 );
@@ -210,6 +213,7 @@ impl<'a> PeekView<'a> {
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new("Empty file")
+                            .monospace()
                             .color(self.palette.muted)
                             .size(12.0),
                     );
