@@ -419,6 +419,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
     let mut code_block_text = String::new();
     let mut list_number: Option<u64> = None;
     let mut is_blockquote = false;
+    let mut in_list_item = false;
 
     let flush_job = |ui: &mut Ui, job: &mut LayoutJob, bottom_space: f32| {
         if !job.sections.is_empty() {
@@ -435,14 +436,16 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
             Event::Start(Tag::Heading { level, .. }) => {
                 flush_job(ui, &mut current_job, 4.0);
                 is_heading = Some(level);
-                ui.add_space(6.0);
+                ui.add_space(8.0);
             }
             Event::End(TagEnd::Heading(_)) => {
                 is_heading = None;
                 flush_job(ui, &mut current_job, 6.0);
             }
             Event::Start(Tag::Paragraph) => {
-                flush_job(ui, &mut current_job, 0.0);
+                if !in_list_item {
+                    flush_job(ui, &mut current_job, 0.0);
+                }
             }
             Event::End(TagEnd::Paragraph) => {
                 if is_blockquote {
@@ -455,12 +458,12 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                                 egui::Sense::hover(),
                             );
                             ui.painter().rect_filled(bar_rect, 1.0, palette.accent);
-                            ui.add_space(4.0);
+                            ui.add_space(6.0);
                             ui.label(job);
                         });
                         ui.add_space(4.0);
                     }
-                } else {
+                } else if !in_list_item {
                     flush_job(ui, &mut current_job, 6.0);
                 }
             }
@@ -484,17 +487,17 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     egui::Frame::NONE
                         .fill(palette.hover)
                         .inner_margin(egui::Margin {
-                            left: 8,
-                            right: 8,
-                            top: 6,
-                            bottom: 6,
+                            left: 10,
+                            right: 10,
+                            top: 8,
+                            bottom: 8,
                         })
                         .corner_radius(3.0)
                         .show(ui, |ui| {
                             ui.label(
                                 RichText::new(text)
                                     .monospace()
-                                    .size(11.0)
+                                    .size(11.5)
                                     .color(palette.fg),
                             );
                         });
@@ -512,6 +515,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
             }
             Event::Start(Tag::Item) => {
                 flush_job(ui, &mut current_job, 0.0);
+                in_list_item = true;
                 let bullet = match &mut list_number {
                     Some(num) => {
                         let b = format!(" {:>2}. ", num);
@@ -524,14 +528,15 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     &bullet,
                     0.0,
                     TextFormat {
-                        font_id: egui::FontId::monospace(11.5),
+                        font_id: egui::FontId::monospace(12.0),
                         color: palette.accent,
                         ..Default::default()
                     },
                 );
             }
             Event::End(TagEnd::Item) => {
-                flush_job(ui, &mut current_job, 3.0);
+                in_list_item = false;
+                flush_job(ui, &mut current_job, 4.0);
             }
             Event::Start(Tag::Strong) => is_bold = true,
             Event::End(TagEnd::Strong) => is_bold = false,
@@ -551,8 +556,9 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     " ",
                     0.0,
                     TextFormat {
-                        font_id: egui::FontId::proportional(12.0),
+                        font_id: egui::FontId::proportional(13.0),
                         color: palette.fg,
+                        line_height: Some(18.0),
                         ..Default::default()
                     },
                 );
@@ -562,8 +568,9 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     "\n",
                     0.0,
                     TextFormat {
-                        font_id: egui::FontId::proportional(12.0),
+                        font_id: egui::FontId::proportional(13.0),
                         color: palette.fg,
+                        line_height: Some(18.0),
                         ..Default::default()
                     },
                 );
@@ -576,7 +583,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                         &format!(" `{text}` "),
                         0.0,
                         TextFormat {
-                            font_id: egui::FontId::monospace(11.0),
+                            font_id: egui::FontId::monospace(11.5),
                             color: palette.accent,
                             ..Default::default()
                         },
@@ -589,18 +596,20 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                 } else {
                     let (font_size, color) = if let Some(lvl) = is_heading {
                         match lvl {
-                            HeadingLevel::H1 => (15.0, palette.accent),
-                            HeadingLevel::H2 => (13.5, palette.fg),
-                            _ => (12.5, palette.fg),
+                            HeadingLevel::H1 => (18.0, palette.accent),
+                            HeadingLevel::H2 => (15.5, palette.fg),
+                            HeadingLevel::H3 => (14.0, palette.fg),
+                            _ => (13.0, palette.fg),
                         }
                     } else if is_bold {
-                        (12.5, palette.accent)
+                        (13.5, palette.accent)
                     } else if is_blockquote {
-                        (11.5, palette.muted)
+                        (12.0, palette.muted)
                     } else {
-                        (12.0, palette.fg)
+                        (13.0, palette.fg)
                     };
 
+                    let line_height = Some(font_size * 1.35);
                     let font_id = egui::FontId::proportional(font_size);
                     current_job.append(
                         &text,
@@ -609,6 +618,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                             font_id,
                             color,
                             italics: is_italic || is_blockquote,
+                            line_height,
                             ..Default::default()
                         },
                     );

@@ -67,6 +67,13 @@ pub fn palette_for(name: &str, system_theme: Option<Theme>) -> Palette {
 }
 
 pub fn setup_fonts(ctx: &Context) {
+    // Enable crisp pixel-grid alignment for text, lines, and rects
+    ctx.tessellation_options_mut(|to| {
+        to.round_text_to_pixels = true;
+        to.round_line_segments_to_pixels = true;
+        to.round_rects_to_pixels = true;
+    });
+
     let mut fonts = egui::FontDefinitions::default();
 
     // Embedded JetBrains Mono font (SIL Open Font License 1.1)
@@ -83,6 +90,38 @@ pub fn setup_fonts(ctx: &Context) {
         .entry(egui::FontFamily::Monospace)
         .or_default()
         .insert(0, "JetBrainsMono-Regular".to_owned());
+
+    // Primary proportional font: high-legibility system font (macOS SFNS/Helvetica, Windows Segoe UI, Linux DejaVu)
+    #[cfg(target_os = "macos")]
+    let primary_proportional = [
+        ("/System/Library/Fonts/SFNS.ttf", "SFNS"),
+        ("/System/Library/Fonts/HelveticaNeue.ttc", "HelveticaNeue"),
+        ("/System/Library/Fonts/Supplemental/Arial.ttf", "Arial"),
+    ];
+    #[cfg(target_os = "windows")]
+    let primary_proportional = [
+        ("C:\\Windows\\Fonts\\segoeui.ttf", "SegoeUI"),
+        ("C:\\Windows\\Fonts\\arial.ttf", "Arial"),
+    ];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let primary_proportional = [
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "DejaVuSans"),
+    ];
+
+    for (path, name) in primary_proportional {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts.font_data.insert(
+                name.to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, name.to_owned());
+            break;
+        }
+    }
 
     // CJK and non-Latin system fallback font chain
     #[cfg(target_os = "macos")]
@@ -195,5 +234,22 @@ mod tests {
         assert_eq!(palette_for("auto", Some(Theme::Light)), BRAUN);
         assert_eq!(palette_for("auto", Some(Theme::Dark)), GRUVBOX_DARK);
         assert_eq!(palette_for("auto", None), BRAUN);
+    }
+
+    #[test]
+    fn test_setup_fonts_run() {
+        let ctx = Context::default();
+        ctx.tessellation_options_mut(|to| {
+            to.round_text_to_pixels = true;
+            to.round_line_segments_to_pixels = true;
+            to.round_rects_to_pixels = true;
+        });
+        setup_fonts(&ctx);
+        let mut output = ctx.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.label(egui::RichText::new("Crisp and clean text").font(egui::FontId::proportional(13.0)));
+            });
+        });
+        output.textures_delta.clear();
     }
 }
