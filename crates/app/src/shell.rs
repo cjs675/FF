@@ -86,7 +86,8 @@ impl FfShell {
             None => (Config::default(), Vec::new()),
         };
 
-        let palette = theme::palette_for(&config.theme);
+        let palette = theme::palette_for(&config.theme, cc.egui_ctx.system_theme());
+        theme::setup_fonts(&cc.egui_ctx);
         theme::apply(&cc.egui_ctx, palette);
 
         // Placeholder cwd (`""`): the shell parks at an empty in-memory dir
@@ -352,11 +353,7 @@ impl eframe::App for FfShell {
             }
         };
 
-        let hairline_border = if self.palette.is_dark {
-            egui::Color32::from_rgb(0x3c, 0x38, 0x36)
-        } else {
-            egui::Color32::from_rgb(0xe2, 0xdf, 0xd7)
-        };
+        let hairline_border = self.palette.border;
 
         Panel::bottom("status_hairline")
             .show_separator_line(false)
@@ -641,11 +638,7 @@ impl eframe::App for FfShell {
                 }
             }
 
-            let border_color = if self.palette.is_dark {
-                egui::Color32::from_rgb(0x50, 0x49, 0x45)
-            } else {
-                egui::Color32::from_rgb(0xe2, 0xdf, 0xd7)
-            };
+            let border_color = self.palette.border;
 
             egui::Window::new("open_with_palette")
                 .title_bar(false)
@@ -655,7 +648,7 @@ impl eframe::App for FfShell {
                 .fixed_size(egui::vec2(400.0, 260.0))
                 .frame(
                     egui::Frame::NONE
-                        .fill(self.palette.bg)
+                        .fill(self.palette.surface)
                         .stroke(egui::Stroke::new(1.0, border_color))
                         .corner_radius(6)
                         .inner_margin(egui::Margin::symmetric(14, 12)),
