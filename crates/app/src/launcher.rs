@@ -492,7 +492,11 @@ impl LauncherState {
                                                         ui.painter().rect_filled(rect, 4.0, palette.sel);
                                                     }
 
-                                                    let icon = if entry.is_dir() { "📁 " } else { "📄 " };
+                                                    let display_name = if entry.is_dir() {
+                                                        format!("{}/", entry.name)
+                                                    } else {
+                                                        entry.name.clone()
+                                                    };
                                                     let name_color = if entry.is_dir() {
                                                         palette.accent
                                                     } else {
@@ -502,7 +506,7 @@ impl LauncherState {
                                                     ui.painter().text(
                                                         egui::pos2(rect.min.x + 8.0, rect.center().y),
                                                         egui::Align2::LEFT_CENTER,
-                                                        format!("{icon}{}", entry.name),
+                                                        &display_name,
                                                         egui::FontId::proportional(12.5),
                                                         name_color,
                                                     );
