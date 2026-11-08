@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{CentralPanel, Key, Panel, RichText, ScrollArea, TextEdit, Ui, ViewportCommand};
+use egui::{CentralPanel, Key, Panel, PointerButton, RichText, ScrollArea, TextEdit, Ui, ViewportCommand};
 use ff_core::cfg::{self, Config};
 use ff_core::find::{FileFinder, FsearchFinder, PortableFilter};
 use ff_core::model::{AppOpener, Entry, EntryStats};
@@ -84,7 +84,11 @@ pub struct FfShell {
     pub frequents_filter: String,
     pub frequents_focus_filter: bool,
     last_visited_cwd: Option<PathBuf>,
+    /// Navigation history stack for Back/Forward navigation.
+    history_back: Vec<(PathBuf, Option<String>)>,
+    history_forward: Vec<(PathBuf, Option<String>)>,
 }
+
 
 
 impl FfShell {
@@ -172,8 +176,11 @@ impl FfShell {
             frequents_filter: String::new(),
             frequents_focus_filter: false,
             last_visited_cwd: None,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
         }
     }
+
 
 
     /// Applies the worker's restored state: navigate to the last dir, keep
@@ -208,7 +215,55 @@ impl FfShell {
         self.pending_scroll = true;
     }
 
+    fn push_history(&mut self) {
+        if !self.cwd.as_os_str().is_empty() {
+            self.history_back.push((self.cwd.clone(), self.anchor.clone()));
+            if self.history_back.len() > 100 {
+                self.history_back.remove(0);
+            }
+            self.history_forward.clear();
+        }
+    }
+
+    fn go_back(&mut self) {
+        if self.frequents_open {
+            self.frequents_open = false;
+            return;
+        }
+        if let Some((prev_cwd, prev_anchor)) = self.history_back.pop() {
+            self.history_forward.push((self.cwd.clone(), self.anchor.clone()));
+            self.cwd = prev_cwd;
+            self.selection = 0;
+            self.anchor = prev_anchor;
+            self.filter.clear();
+            self.pending_scroll = true;
+        } else if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf())
+            && parent != self.cwd
+        {
+            self.history_forward.push((self.cwd.clone(), self.anchor.clone()));
+            self.cwd = parent;
+            self.selection = 0;
+            self.anchor = None;
+            self.filter.clear();
+            self.pending_scroll = true;
+        }
+    }
+
+    fn go_forward(&mut self) {
+        if let Some((next_cwd, next_anchor)) = self.history_forward.pop() {
+            self.history_back.push((self.cwd.clone(), self.anchor.clone()));
+            self.cwd = next_cwd;
+            self.selection = 0;
+            self.anchor = next_anchor;
+            self.filter.clear();
+            self.pending_scroll = true;
+        }
+    }
+
     fn navigate_to(&mut self, target: PathBuf) {
+        if self.cwd != target {
+            self.push_history();
+        }
         self.cwd = target;
         self.selection = 0;
         self.anchor = None;
@@ -217,6 +272,7 @@ impl FfShell {
     }
 
     fn descend(&mut self, name: &str) {
+        self.push_history();
         self.cwd = self.cwd.join(name);
         self.selection = 0;
         self.anchor = None;
@@ -224,13 +280,15 @@ impl FfShell {
     }
 
     fn parent(&mut self) {
-        if let Some(parent) = self.cwd.parent()
-            && parent != self.cwd {
-                self.cwd = parent.to_path_buf();
-                self.selection = 0;
-                self.anchor = None;
-                self.filter.clear();
-            }
+        if let Some(parent) = self.cwd.parent().map(|p| p.to_path_buf())
+            && parent != self.cwd
+        {
+            self.push_history();
+            self.cwd = parent;
+            self.selection = 0;
+            self.anchor = None;
+            self.filter.clear();
+        }
     }
 
     fn render_frequents_view(&mut self, ui: &mut Ui) {
@@ -508,7 +566,34 @@ impl eframe::App for FfShell {
                 || ((i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(Key::U))
         });
 
-        if frequents_toggle {
+        let mouse_back = ctx.input(|i| {
+            i.pointer.button_clicked(PointerButton::Extra1)
+                || i.pointer.button_pressed(PointerButton::Extra1)
+        });
+        let mouse_forward = ctx.input(|i| {
+            let b = PointerButton::Extra2;
+            i.pointer.button_clicked(b) || i.pointer.button_pressed(b)
+        });
+
+        let key_back = ctx.input(|i| {
+            let cmd_or_ctrl = i.modifiers.command || i.modifiers.ctrl;
+            (cmd_or_ctrl && (i.key_pressed(Key::ArrowLeft) || i.key_pressed(Key::OpenBracket)))
+                || (i.modifiers.alt && i.key_pressed(Key::ArrowLeft))
+        });
+        let key_forward = ctx.input(|i| {
+            let cmd_or_ctrl = i.modifiers.command || i.modifiers.ctrl;
+            (cmd_or_ctrl && (i.key_pressed(Key::ArrowRight) || i.key_pressed(Key::CloseBracket)))
+                || (i.modifiers.alt && i.key_pressed(Key::ArrowRight))
+        });
+
+        let back_requested = mouse_back || (!self.filter_focused && key_back);
+        let forward_requested = mouse_forward || (!self.filter_focused && key_forward);
+
+        if back_requested {
+            self.go_back();
+        } else if forward_requested {
+            self.go_forward();
+        } else if frequents_toggle {
             self.frequents_open = !self.frequents_open;
             if self.frequents_open {
                 self.frequents_selection = 0;
@@ -1159,6 +1244,8 @@ mod tests {
             frequents_filter: String::new(),
             frequents_focus_filter: false,
             last_visited_cwd: None,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
         };
 
         let state = SessionState {
@@ -1180,5 +1267,82 @@ mod tests {
         assert_eq!(shell.selection, 0);
         assert!(shell.pending_scroll);
     }
+
+    #[test]
+    fn test_navigation_history_back_forward() {
+        let mut shell = FfShell {
+            config: Config::default(),
+            config_warnings: Vec::new(),
+            palette: crate::theme::palette_for("gruvbox-dark", None),
+            scanner: FsEngine::launch(false),
+            finder: Box::new(ff_core::find::PortableFilter),
+            cwd: PathBuf::from("/root/dir_a"),
+            entries: Vec::new(),
+            display: Vec::new(),
+            anchor: Some("a.txt".into()),
+            filter: String::new(),
+            selection: 0,
+            listing_loading: false,
+            filter_focus_request: false,
+            filter_focused: false,
+            pointer_over_interactive: false,
+            session_path: None,
+            last_saved: None,
+            pending_scroll: false,
+            stat_cache: HashMap::new(),
+            open_with_modal: None,
+            status_toast: None,
+            frequents: Vec::new(),
+            frequents_open: false,
+            frequents_selection: 0,
+            frequents_filter: String::new(),
+            frequents_focus_filter: false,
+            last_visited_cwd: None,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+        };
+
+        // Navigate to dir_b
+        shell.anchor = Some("file_in_a.txt".into());
+        shell.navigate_to(PathBuf::from("/root/dir_b"));
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_b"));
+        assert_eq!(shell.history_back.len(), 1);
+        assert_eq!(shell.history_back[0].0, PathBuf::from("/root/dir_a"));
+        assert_eq!(shell.history_back[0].1, Some("file_in_a.txt".into()));
+
+        // Navigate to dir_c
+        shell.anchor = Some("file_in_b.txt".into());
+        shell.navigate_to(PathBuf::from("/root/dir_c"));
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_c"));
+        assert_eq!(shell.history_back.len(), 2);
+
+        // Go back -> returns to dir_b, restores anchor
+        shell.go_back();
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_b"));
+        assert_eq!(shell.anchor, Some("file_in_b.txt".into()));
+        assert_eq!(shell.history_forward.len(), 1);
+
+        // Go back again -> returns to dir_a, restores anchor
+        shell.go_back();
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_a"));
+        assert_eq!(shell.anchor, Some("file_in_a.txt".into()));
+        assert_eq!(shell.history_forward.len(), 2);
+
+        // Go forward -> returns to dir_b
+        shell.go_forward();
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_b"));
+        assert_eq!(shell.anchor, Some("file_in_b.txt".into()));
+
+        // Go forward -> returns to dir_c
+        shell.go_forward();
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_c"));
+
+        // Frequents toggle + back closes frequents view
+        shell.frequents_open = true;
+        shell.go_back();
+        assert!(!shell.frequents_open);
+        assert_eq!(shell.cwd, PathBuf::from("/root/dir_c"));
+    }
 }
+
 

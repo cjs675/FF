@@ -176,6 +176,7 @@ pub fn apply(ctx: &Context, palette: Palette) {
     style.spacing.item_spacing = egui::vec2(0.0, 0.0);
     style.spacing.interact_size.y = 24.0;
     style.spacing.button_padding = egui::vec2(8.0, 4.0);
+    style.spacing.scroll.kinetic.rubber_band = false;
 
     ctx.set_style_of(mode, style);
 }
