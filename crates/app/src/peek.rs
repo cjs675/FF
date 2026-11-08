@@ -52,23 +52,129 @@ impl<'a> PeekView<'a> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| self.path.to_string_lossy().to_string());
 
-        // Header
-        ui.horizontal(|ui| {
+        // Extract specs text (size, type, dimensions, lines)
+        let (specs_text, truncated_hint) = if self.loading {
+            ("Loading preview...".to_string(), None)
+        } else if let Some(payload) = self.payload {
+            match payload {
+                PeekPayload::Empty => ("Empty file  ·  0 B".to_string(), None),
+                PeekPayload::Directory { count, size, .. } => {
+                    let size_str = ff_core::model::EntryStats {
+                        size: *size,
+                        mtime_secs: 0,
+                    }
+                    .format_size();
+                    (format!("Directory  ·  {count} items  ·  {size_str}"), None)
+                }
+                PeekPayload::Image {
+                    width,
+                    height,
+                    total_size,
+                    ..
+                } => {
+                    let ext = self
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_uppercase();
+                    let size_str = ff_core::model::EntryStats {
+                        size: *total_size,
+                        mtime_secs: 0,
+                    }
+                    .format_size();
+                    (format!("{width} × {height} px  ·  {size_str}  ·  {ext}"), None)
+                }
+                PeekPayload::FileText {
+                    content,
+                    total_size,
+                    truncated,
+                } => {
+                    let size_str = ff_core::model::EntryStats {
+                        size: *total_size,
+                        mtime_secs: 0,
+                    }
+                    .format_size();
+                    let line_count = content.lines().count();
+                    let ext = self
+                        .path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    let ss = get_syntax_set();
+                    let syntax_name = ss
+                        .find_syntax_by_extension(ext)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_else(|| {
+                            if ext.is_empty() {
+                                "Plain Text".to_string()
+                            } else {
+                                ext.to_uppercase()
+                            }
+                        });
+                    let hint = if *truncated {
+                        Some("(head 128 KB)")
+                    } else {
+                        None
+                    };
+                    (
+                        format!("{line_count} lines  ·  {size_str}  ·  {syntax_name}"),
+                        hint,
+                    )
+                }
+                PeekPayload::Binary { size } => {
+                    let size_str = ff_core::model::EntryStats {
+                        size: *size,
+                        mtime_secs: 0,
+                    }
+                    .format_size();
+                    (format!("Binary file  ·  {size_str}"), None)
+                }
+                PeekPayload::TooLarge { size } => {
+                    let size_str = ff_core::model::EntryStats {
+                        size: *size,
+                        mtime_secs: 0,
+                    }
+                    .format_size();
+                    (format!("Large file (> 10 MB)  ·  {size_str}"), None)
+                }
+                PeekPayload::Failed { error } => (format!("Cannot load  ·  {error}"), None),
+            }
+        } else {
+            ("No selection".to_string(), None)
+        };
+
+        // 1. Centered Header: filename + specs (size, type, dimensions)
+        ui.vertical_centered(|ui| {
+            ui.add_space(2.0);
             ui.label(
                 RichText::new(&name)
                     .strong()
-                    .size(13.0)
+                    .size(13.5)
                     .color(self.palette.accent),
             );
+            ui.add_space(3.0);
+
+            let mut header_specs = specs_text;
+            if let Some(h) = truncated_hint {
+                header_specs.push_str(&format!("  ·  {h}"));
+            }
+            ui.label(
+                RichText::new(header_specs)
+                    .monospace()
+                    .size(11.0)
+                    .color(self.palette.muted),
+            );
+            ui.add_space(6.0);
         });
 
-        ui.add_space(4.0);
+        // 2. 1px stone divider line across the preview pane width
         let (hairline_rect, _) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), 1.0),
             egui::Sense::hover(),
         );
         ui.painter().rect_filled(hairline_rect, 0.0, self.palette.border);
-        ui.add_space(6.0);
+        ui.add_space(10.0);
 
         if self.loading {
             ui.add_space(16.0);
@@ -105,140 +211,63 @@ impl<'a> PeekView<'a> {
                     );
                 });
             }
-            PeekPayload::Directory {
-                count,
-                size,
-                mtime_secs,
-            } => {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("TYPE")
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
-                    );
-                    ui.label(
-                        RichText::new("Directory")
-                            .size(12.0)
-                            .color(self.palette.fg),
-                    );
-                });
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("ENTRIES")
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
-                    );
-                    ui.label(
-                        RichText::new(format!("{count} items"))
-                            .size(12.0)
-                            .color(self.palette.fg),
-                    );
-                });
-                let size_str = ff_core::model::EntryStats {
-                    size: *size,
-                    mtime_secs: *mtime_secs,
-                }
-                .format_size();
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("SIZE")
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
-                    );
-                    ui.label(
-                        RichText::new(format!("{size_str} in files"))
-                            .size(12.0)
-                            .color(self.palette.fg),
-                    );
-                });
+            PeekPayload::Directory { mtime_secs, .. } => {
                 let mtime_str = ff_core::model::EntryStats {
-                    size: *size,
+                    size: 0,
                     mtime_secs: *mtime_secs,
                 }
                 .format_mtime();
-                ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("MODIFIED")
+                        RichText::new(format!("Modified: {mtime_str}"))
                             .monospace()
                             .size(11.0)
                             .color(self.palette.muted),
-                    );
-                    ui.label(
-                        RichText::new(mtime_str)
-                            .size(12.0)
-                            .color(self.palette.fg),
                     );
                 });
             }
-            PeekPayload::Image { width, height, .. } => {
-                let ext = self
-                    .path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_uppercase();
-
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("{width} × {height} px  ·  {ext}"))
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
-                    );
-                });
-                ui.add_space(8.0);
-
+            PeekPayload::Image {
+                width,
+                height,
+                ..
+            } => {
                 if let Some(texture) = self.texture {
-                    let avail = ui.available_size();
+                    let avail_w = (ui.available_width() - 8.0).max(10.0);
+                    let avail_h = (ui.available_height() - 16.0).max(10.0);
                     let aspect = *width as f32 / *height as f32;
-                    let mut draw_w = avail.x.min(*width as f32);
+                    let mut draw_w = avail_w.min(*width as f32);
                     let mut draw_h = draw_w / aspect;
-                    if draw_h > (avail.y - 10.0).max(10.0) {
-                        draw_h = (avail.y - 10.0).max(10.0);
+                    if draw_h > avail_h {
+                        draw_h = avail_h;
                         draw_w = draw_h * aspect;
                     }
-                    ui.centered_and_justified(|ui| {
-                        ui.image(egui::load::SizedTexture::new(
+
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(6.0);
+                        let (rect, _resp) = ui.allocate_exact_size(
+                            egui::vec2(draw_w.round(), draw_h.round()),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().image(
                             texture.id(),
-                            egui::vec2(draw_w.max(1.0), draw_h.max(1.0)),
-                        ));
+                            rect,
+                            egui::Rect::from_min_max(
+                                egui::pos2(0.0, 0.0),
+                                egui::pos2(1.0, 1.0),
+                            ),
+                            egui::Color32::WHITE,
+                        );
+                        ui.painter().rect_stroke(
+                            rect,
+                            2.0,
+                            egui::Stroke::new(1.0, self.palette.border),
+                            egui::StrokeKind::Outside,
+                        );
                     });
                 }
             }
-            PeekPayload::FileText {
-                content,
-                total_size,
-                truncated,
-            } => {
-                let size_str = ff_core::model::EntryStats {
-                    size: *total_size,
-                    mtime_secs: 0,
-                }
-                .format_size();
-
-                let line_count = content.lines().count();
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("{line_count} lines  ·  {size_str}"))
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
-                    );
-                    if *truncated {
-                        ui.label(
-                            RichText::new("(head 128 KB)")
-                                .monospace()
-                                .size(11.0)
-                                .color(self.palette.accent),
-                        );
-                    }
-                });
-                ui.add_space(6.0);
-
+            PeekPayload::FileText { content, .. } => {
                 ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -321,49 +350,23 @@ impl<'a> PeekView<'a> {
                         }
                     });
             }
-            PeekPayload::Binary { size } => {
-                let size_str = ff_core::model::EntryStats {
-                    size: *size,
-                    mtime_secs: 0,
-                }
-                .format_size();
+            PeekPayload::Binary { .. } => {
                 ui.add_space(24.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("Binary file")
-                            .strong()
-                            .size(13.0)
-                            .color(self.palette.fg),
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(format!("Size: {size_str}"))
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
+                        RichText::new("Binary contents omitted")
+                            .color(self.palette.muted)
+                            .size(12.0),
                     );
                 });
             }
-            PeekPayload::TooLarge { size } => {
-                let size_str = ff_core::model::EntryStats {
-                    size: *size,
-                    mtime_secs: 0,
-                }
-                .format_size();
+            PeekPayload::TooLarge { .. } => {
                 ui.add_space(24.0);
                 ui.vertical_centered(|ui| {
                     ui.label(
-                        RichText::new("File too large to preview (> 10 MB)")
-                            .strong()
-                            .size(13.0)
-                            .color(self.palette.accent),
-                    );
-                    ui.add_space(4.0);
-                    ui.label(
-                        RichText::new(format!("Size: {size_str}"))
-                            .monospace()
-                            .size(11.0)
-                            .color(self.palette.muted),
+                        RichText::new("File exceeds 10 MB preview limit")
+                            .color(self.palette.accent)
+                            .size(12.0),
                     );
                 });
             }

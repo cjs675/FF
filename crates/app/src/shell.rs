@@ -582,7 +582,7 @@ impl eframe::App for FfShell {
 
         while let Some((_ticket, path, payload)) = self.scanner.take_peek() {
             if self.peek_path.as_ref() == Some(&path) {
-                if let ff_core::ops::peek::PeekPayload::Image { width, height, rgba } = &payload {
+                if let ff_core::ops::peek::PeekPayload::Image { width, height, rgba, .. } = &payload {
                     let image = egui::ColorImage::from_rgba_unmultiplied(
                         [*width as usize, *height as usize],
                         rgba,
@@ -1111,30 +1111,37 @@ impl eframe::App for FfShell {
                         egui::Stroke::new(1.0, border_color),
                     );
 
-                    ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                        if let Some(path) = self.peek_path.as_ref() {
-                            let view = crate::peek::PeekView {
-                                path,
-                                payload: self.peek_payload.as_ref(),
-                                loading: self.peek_loading,
-                                texture: self.peek_texture.as_ref(),
-                                palette: &self.palette,
-                                theme_name: &self.config.theme,
-                                syntax_enabled: self.config.preview_syntax,
-                            };
-                            view.show(ui);
-                        } else {
-                            ui.add_space(16.0);
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new("Select an item to preview")
-                                        .color(self.palette.muted)
-                                        .size(12.0),
-                                );
-                            });
-                        }
-                    });
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 12,
+                            top: 12,
+                            bottom: 8,
+                        })
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                            if let Some(path) = self.peek_path.as_ref() {
+                                let view = crate::peek::PeekView {
+                                    path,
+                                    payload: self.peek_payload.as_ref(),
+                                    loading: self.peek_loading,
+                                    texture: self.peek_texture.as_ref(),
+                                    palette: &self.palette,
+                                    theme_name: &self.config.theme,
+                                    syntax_enabled: self.config.preview_syntax,
+                                };
+                                view.show(ui);
+                            } else {
+                                ui.add_space(24.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        RichText::new("Select an item to preview")
+                                            .color(self.palette.muted)
+                                            .size(12.0),
+                                    );
+                                });
+                            }
+                        });
                 });
         }
 

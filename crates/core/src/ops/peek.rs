@@ -33,6 +33,7 @@ pub enum PeekPayload {
     Image {
         width: u32,
         height: u32,
+        total_size: u64,
         rgba: Vec<u8>,
     },
     Binary {
@@ -103,6 +104,7 @@ pub fn load_peek(path: &Path) -> PeekPayload {
         return PeekPayload::Image {
             width,
             height,
+            total_size,
             rgba: rgba.into_raw(),
         };
     }
