@@ -27,6 +27,12 @@ impl Entry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitStatus {
+    pub branch: String,
+    pub is_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppOpener {
     pub name: String,
     pub id: String,

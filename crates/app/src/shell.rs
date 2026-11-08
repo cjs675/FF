@@ -15,10 +15,23 @@ use egui::{CentralPanel, Key, Panel, RichText, ScrollArea, TextEdit, Ui, Viewpor
 use ff_core::cfg::{self, Config};
 use ff_core::find::{FileFinder, PortableFilter};
 use ff_core::model::{AppOpener, Entry, EntryStats};
-use ff_core::scan::{DirSource, FsEngine};
+use ff_core::scan::{DirSource, FsEngine, WatcherState};
 use ff_core::session::{self, SessionState};
 
 use crate::theme::{self, Palette};
+
+fn truncate_middle(s: &str, max_len: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
+        s.to_string()
+    } else {
+        let left = max_len.saturating_sub(3) / 2;
+        let right = max_len.saturating_sub(3) - left;
+        let start: String = s.chars().take(left).collect();
+        let end: String = s.chars().skip(char_count - right).collect();
+        format!("{start}...{end}")
+    }
+}
 
 struct OpenWithModal {
     path: PathBuf,
@@ -33,6 +46,7 @@ struct OpenWithModal {
 pub struct FfShell {
     #[allow(dead_code)]
     pub config: Config,
+    #[allow(dead_code)]
     pub config_warnings: Vec<String>,
     pub palette: Palette,
     scanner: FsEngine,
@@ -322,7 +336,7 @@ impl eframe::App for FfShell {
 
         self.pointer_over_interactive = false;
 
-        // --- bottom: debug status line (v1 replaces it with the hairline)
+        // --- bottom: 24px status hairline (PLAN §10 it16)
         let engine_error = self.scanner.last_error().map(str::to_owned);
         let now = Instant::now();
         let active_toast = match &self.status_toast {
@@ -337,30 +351,114 @@ impl eframe::App for FfShell {
                 None
             }
         };
-        Panel::bottom("status")
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let path = format!("[{}]", self.cwd.display());
-                    ui.label(RichText::new(path).color(self.palette.muted).size(11.0));
-                    let mut note = format!(" {} items", self.display.len());
-                    if self.listing_loading {
-                        note.push_str("  |  loading");
-                    } else if let Some(error) = &engine_error {
-                        note = format!("  |  cannot read: {error}");
-                    }
-                    if !self.filter.is_empty() {
-                        note.push_str("  |  filter");
-                    }
-                    if !self.config_warnings.is_empty() {
-                        note.push_str(&format!("  |  cfg: {} warn", self.config_warnings.len()));
-                    }
-                    ui.label(RichText::new(note).color(self.palette.muted).size(11.0));
 
-                    if let Some(toast) = active_toast {
-                        ui.label(RichText::new(format!("  |  {toast}")).color(self.palette.accent).size(11.0));
-                    }
-                });
+        let hairline_border = if self.palette.is_dark {
+            egui::Color32::from_rgb(0x3c, 0x38, 0x36)
+        } else {
+            egui::Color32::from_rgb(0xe2, 0xdf, 0xd7)
+        };
+
+        Panel::bottom("status_hairline")
+            .show_separator_line(false)
+            .resizable(false)
+            .exact_size(24.0)
+            .frame(egui::Frame::NONE.fill(self.palette.bg))
+            .show(ui, |ui| {
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 24.0),
+                    egui::Sense::hover(),
+                );
+                let painter = ui.painter();
+
+                // 1px stone divider line across top of hairline
+                painter.line_segment(
+                    [rect.left_top(), rect.right_top()],
+                    egui::Stroke::new(1.0, hairline_border),
+                );
+
+                let center_y = rect.center().y;
+
+                // Priority 1: Left segment (item count and shallow file size)
+                let dir_size_str = match self.scanner.dir_size() {
+                    Some(bytes) => format!("{} in files", EntryStats { size: bytes, mtime_secs: 0 }.format_size()),
+                    None => "--".to_string(),
+                };
+                let mut left_text = format!("{} items  |  {}", self.display.len(), dir_size_str);
+                if self.listing_loading {
+                    left_text.push_str("  |  loading");
+                } else if let Some(error) = &engine_error {
+                    left_text = format!("cannot read: {error}");
+                }
+                painter.text(
+                    egui::pos2(rect.min.x + 10.0, center_y),
+                    egui::Align2::LEFT_CENTER,
+                    left_text,
+                    egui::FontId::monospace(11.0),
+                    self.palette.muted,
+                );
+
+                // Priority 2: Right segment (git branch, dirty marker, 6px watcher status dot)
+                let dot_center = egui::pos2(rect.max.x - 12.0, center_y);
+                let dot_color = match self.scanner.watcher_state() {
+                    WatcherState::Active => self.palette.green,
+                    WatcherState::Coalescing => self.palette.amber,
+                    WatcherState::Degraded => self.palette.accent,
+                };
+                painter.circle_filled(dot_center, 3.0, dot_color);
+
+                if let Some(git) = self.scanner.git_status() {
+                    let git_text = if git.is_dirty {
+                        format!("{} *", git.branch)
+                    } else {
+                        git.branch.clone()
+                    };
+                    let git_color = if git.is_dirty {
+                        self.palette.accent
+                    } else {
+                        self.palette.muted
+                    };
+                    painter.text(
+                        egui::pos2(rect.max.x - 24.0, center_y),
+                        egui::Align2::RIGHT_CENTER,
+                        git_text,
+                        egui::FontId::monospace(11.0),
+                        git_color,
+                    );
+                }
+
+                // Priority 3: Center segment (error toast OR selected item inspection with responsive degradation)
+                let width = rect.width();
+                if let Some(toast) = active_toast {
+                    painter.text(
+                        egui::pos2(rect.center().x, center_y),
+                        egui::Align2::CENTER_CENTER,
+                        toast,
+                        egui::FontId::monospace(11.0),
+                        self.palette.accent,
+                    );
+                } else if width >= 500.0
+                    && let Some(entry) = self.display.get(self.selection)
+                {
+                    let center_text = if width < 600.0 {
+                        truncate_middle(&entry.name, 20)
+                    } else {
+                        let stats = self.stat_cache.get(&entry.path);
+                        let size = stats.map(|s| s.format_size()).unwrap_or_default();
+                        let mtime = stats.map(|s| s.format_mtime()).unwrap_or_default();
+                        if !entry.is_dir() && !size.is_empty() && !mtime.is_empty() {
+                            format!("{}  ·  {}  ·  {}", truncate_middle(&entry.name, 26), size, mtime)
+                        } else {
+                            truncate_middle(&entry.name, 32)
+                        }
+                    };
+                    painter.text(
+                        egui::pos2(rect.center().x, center_y),
+                        egui::Align2::CENTER_CENTER,
+                        center_text,
+                        egui::FontId::monospace(11.0),
+                        self.palette.muted,
+                    );
+                }
             });
 
         // --- bottom: filter line, only while summoned or holding text

@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::{DirSource, Listing, sort_entries};
-use crate::model::{AppOpener, Entry, EntryKind, EntryStats};
+use crate::model::{AppOpener, Entry, EntryKind, EntryStats, GitStatus};
 use crate::session::{self, SessionState};
 
 /// Paint this many entries immediately, unsorted, while the rest reads.
@@ -69,6 +70,23 @@ pub(crate) enum Work {
         ticket: u64,
         path: PathBuf,
     },
+    /// Calculate shallow directory size off-thread.
+    StatDir {
+        ticket: u64,
+        dir: PathBuf,
+    },
+    /// Discover git branch and status off-thread.
+    GitStatus {
+        ticket: u64,
+        dir: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatcherState {
+    Active,
+    Coalescing,
+    Degraded,
 }
 
 pub(crate) enum ScanEvent {
@@ -108,6 +126,24 @@ pub(crate) enum ScanEvent {
         ticket: u64,
         path: PathBuf,
         apps: Vec<AppOpener>,
+    },
+    /// Watcher quiet window active: coalescing filesystem events.
+    Coalescing {
+        dir: PathBuf,
+    },
+    /// Shallow directory size total bytes.
+    DirSize {
+        ticket: u64,
+        total_bytes: u64,
+    },
+    /// Git repository status delivered.
+    Git {
+        ticket: u64,
+        status: Option<GitStatus>,
+    },
+    /// Watcher initialization or registration failed.
+    WatchDegraded {
+        dir: PathBuf,
     },
 }
 
@@ -161,6 +197,7 @@ fn spawn_worker(
     show_hidden: bool,
     session_path: Option<PathBuf>,
     waker: Option<RepaintWaker>,
+    current_ticket: Arc<AtomicU64>,
 ) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEvent>) {
     let (work_tx, work_rx) = mpsc::channel::<Work>();
     let (event_tx, event_rx) = mpsc::channel::<ScanEvent>();
@@ -226,7 +263,13 @@ fn spawn_worker(
                                 };
                                 if let Some((scan_key, canonical)) = watch_target.as_ref()
                                     && event_dir == *canonical {
+                                        let is_first = !dirty_since.contains_key(scan_key);
                                         dirty_since.insert(scan_key.clone(), Instant::now());
+                                        if is_first {
+                                            let _ = send_event(ScanEvent::Coalescing {
+                                                dir: scan_key.clone(),
+                                            });
+                                        }
                                     }
                             }
                         }
@@ -320,17 +363,23 @@ fn spawn_worker(
                                                 dirty_since.insert(dir.clone(), Instant::now());
                                                 watcher = Some((w, watch_rx));
                                                 watched = Some((dir, canonical));
+                                            } else {
+                                                watcher = None;
+                                                watched = None;
+                                                let _ = send_event(ScanEvent::WatchDegraded { dir });
                                             }
                                         }
                                         Err(_) => {
                                             watcher = None;
                                             watched = None;
+                                            let _ = send_event(ScanEvent::WatchDegraded { dir });
                                         }
                                     }
                                 }
                                 Err(_) => {
                                     watcher = None;
                                     watched = None;
+                                    let _ = send_event(ScanEvent::WatchDegraded { dir });
                                 }
                             }
                         }
@@ -363,6 +412,40 @@ fn spawn_worker(
                                 let _ = send_event(ScanEvent::Openers { ticket, path, apps });
                             }
                         }
+                        Work::StatDir { ticket, dir } => {
+                            if ticket == current_ticket.load(Ordering::Relaxed) {
+                                let mut total_bytes: u64 = 0;
+                                let mut count: usize = 0;
+                                if let Ok(entries) = std::fs::read_dir(&dir) {
+                                    for entry in entries {
+                                        count += 1;
+                                        if count.is_multiple_of(256)
+                                            && (current_ticket.load(Ordering::Relaxed) != ticket || count >= 10_000)
+                                        {
+                                            break;
+                                        }
+                                        if let Ok(entry) = entry
+                                            && let Ok(file_type) = entry.file_type()
+                                            && file_type.is_file()
+                                            && let Ok(meta) = std::fs::symlink_metadata(entry.path())
+                                        {
+                                            total_bytes = total_bytes.saturating_add(meta.len());
+                                        }
+                                    }
+                                }
+                                if current_ticket.load(Ordering::Relaxed) == ticket {
+                                    let _ = send_event(ScanEvent::DirSize { ticket, total_bytes });
+                                }
+                            }
+                        }
+                        Work::GitStatus { ticket, dir } => {
+                            if ticket == current_ticket.load(Ordering::Relaxed) {
+                                let status = crate::ops::git::resolve_git_status(&dir);
+                                if current_ticket.load(Ordering::Relaxed) == ticket {
+                                    let _ = send_event(ScanEvent::Git { ticket, status });
+                                }
+                            }
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {} // drains happen next loop
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -380,6 +463,7 @@ pub struct FsEngine {
     work_tx: mpsc::Sender<Work>,
     events: mpsc::Receiver<ScanEvent>,
     ticket: u64,
+    current_ticket: Arc<AtomicU64>,
     live_dir: PathBuf,
     live_entries: Vec<Entry>,
     /// Authoritative listing flag: false while loading/streaming, true after
@@ -397,6 +481,12 @@ pub struct FsEngine {
     pending_stats: Vec<(PathBuf, EntryStats)>,
     /// Off-thread application opener query result.
     pending_openers: Option<(PathBuf, Vec<AppOpener>)>,
+    /// Off-thread shallow directory byte size total.
+    dir_size: Option<u64>,
+    /// Off-thread git repository branch and dirty status.
+    git_status: Option<GitStatus>,
+    /// Watcher health / coalescing status.
+    watcher_state: WatcherState,
 }
 
 impl FsEngine {
@@ -427,11 +517,13 @@ impl FsEngine {
         session_path: Option<PathBuf>,
         waker: Option<RepaintWaker>,
     ) -> Self {
-        let (work_tx, events) = spawn_worker(show_hidden, session_path, waker);
+        let current_ticket = Arc::new(AtomicU64::new(0));
+        let (work_tx, events) = spawn_worker(show_hidden, session_path, waker, current_ticket.clone());
         Self {
             work_tx,
             events,
             ticket: 0,
+            current_ticket,
             live_dir: PathBuf::new(),
             live_entries: Vec::new(),
             ready: false,
@@ -442,11 +534,26 @@ impl FsEngine {
             restored: None,
             pending_stats: Vec::new(),
             pending_openers: None,
+            dir_size: None,
+            git_status: None,
+            watcher_state: WatcherState::Active,
         }
     }
 
     pub fn last_error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub fn dir_size(&self) -> Option<u64> {
+        self.dir_size
+    }
+
+    pub fn git_status(&self) -> Option<&GitStatus> {
+        self.git_status.as_ref()
+    }
+
+    pub fn watcher_state(&self) -> WatcherState {
+        self.watcher_state
     }
 
     /// Consumes the restored session state once it has arrived (the shell
@@ -522,6 +629,9 @@ impl DirSource for FsEngine {
                         self.live_entries = entries;
                         self.ready = true;
                         self.queued = false;
+                        if self.watcher_state == WatcherState::Coalescing {
+                            self.watcher_state = WatcherState::Active;
+                        }
                     }
                 }
                 ScanEvent::Failed { ticket, reason, .. } => {
@@ -544,6 +654,14 @@ impl DirSource for FsEngine {
                         self.ready = false;
                         self.queued = false;
                         self.error = None;
+                        let _ = self.work_tx.send(Work::StatDir {
+                            ticket: self.ticket,
+                            dir: dir.clone(),
+                        });
+                        let _ = self.work_tx.send(Work::GitStatus {
+                            ticket: self.ticket,
+                            dir,
+                        });
                     }
                 }
                 ScanEvent::Stats { ticket, batch } if ticket == self.ticket => {
@@ -551,6 +669,20 @@ impl DirSource for FsEngine {
                 }
                 ScanEvent::Openers { ticket, path, apps } if ticket == self.ticket => {
                     self.pending_openers = Some((path, apps));
+                }
+                ScanEvent::Coalescing { dir } => {
+                    if dir == self.live_dir {
+                        self.watcher_state = WatcherState::Coalescing;
+                    }
+                }
+                ScanEvent::DirSize { ticket, total_bytes } if ticket == self.ticket => {
+                    self.dir_size = Some(total_bytes);
+                }
+                ScanEvent::Git { ticket, status } if ticket == self.ticket => {
+                    self.git_status = status;
+                }
+                ScanEvent::WatchDegraded { dir } if dir == self.live_dir => {
+                    self.watcher_state = WatcherState::Degraded;
                 }
                 _ => {} // stale ticket, dropped
             }
@@ -567,6 +699,7 @@ impl DirSource for FsEngine {
         //    and move the native watch target onto the new directory.
         if dir != self.live_dir {
             self.ticket += 1;
+            self.current_ticket.store(self.ticket, Ordering::Relaxed);
             self.live_dir = dir.to_path_buf();
             self.live_entries.clear();
             self.ready = false;
@@ -574,7 +707,18 @@ impl DirSource for FsEngine {
             self.error = None;
             self.pending_stats.clear();
             self.pending_openers = None;
+            self.dir_size = None;
+            self.git_status = None;
+            self.watcher_state = WatcherState::Active;
             let _ = self.work_tx.send(Work::Watch {
+                dir: dir.to_path_buf(),
+            });
+            let _ = self.work_tx.send(Work::StatDir {
+                ticket: self.ticket,
+                dir: dir.to_path_buf(),
+            });
+            let _ = self.work_tx.send(Work::GitStatus {
+                ticket: self.ticket,
                 dir: dir.to_path_buf(),
             });
         }
@@ -884,6 +1028,58 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "opener query timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dir_size_pipeline_delivers_shallow_total_bytes() {
+        let root = temp_root("dir-size-pipeline");
+        fs::write(root.join("f1.txt"), "12345").unwrap(); // 5 bytes
+        fs::write(root.join("f2.txt"), "1234567890").unwrap(); // 10 bytes
+        let sub = root.join("subdir");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("nested.txt"), "nested content that should not be counted").unwrap();
+
+        let mut engine = FsEngine::launch(false);
+        let _ = wait_complete(&mut engine, &root);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = engine.poll(&root);
+            if let Some(size) = engine.dir_size() {
+                assert_eq!(size, 15);
+                break;
+            }
+            assert!(Instant::now() < deadline, "dir size timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_status_pipeline_delivers_branch_and_status() {
+        let root = temp_root("git-status-pipeline");
+        let git_dir = root.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/hairline\n").unwrap();
+        fs::write(git_dir.join("index"), "dummy index content").unwrap();
+
+        let mut engine = FsEngine::launch(false);
+        let _ = wait_complete(&mut engine, &root);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = engine.poll(&root);
+            if let Some(status) = engine.git_status() {
+                assert_eq!(status.branch, "feature/hairline");
+                assert!(!status.is_dirty);
+                break;
+            }
+            assert!(Instant::now() < deadline, "git status timed out");
             thread::sleep(Duration::from_millis(5));
         }
 

@@ -16,6 +16,8 @@ pub struct Palette {
     pub muted: Color32,
     pub accent: Color32,
     pub red: Color32,
+    pub green: Color32,
+    pub amber: Color32,
     pub is_dark: bool,
 }
 
@@ -27,6 +29,8 @@ pub const GRUVBOX_DARK: Palette = Palette {
     muted: Color32::from_rgb(0x92, 0x83, 0x74),
     accent: Color32::from_rgb(0xfa, 0xbd, 0x2f),
     red: Color32::from_rgb(0xfb, 0x49, 0x34),
+    green: Color32::from_rgb(0xb8, 0xbb, 0x26),
+    amber: Color32::from_rgb(0xd7, 0x99, 0x21),
     is_dark: true,
 };
 
@@ -38,6 +42,8 @@ pub const BRAUN: Palette = Palette {
     muted: Color32::from_rgb(0x5c, 0x5b, 0x64),
     accent: Color32::from_rgb(0xe6, 0x51, 0x00),
     red: Color32::from_rgb(0xd9, 0x38, 0x1e),
+    green: Color32::from_rgb(0x16, 0xa3, 0x4a),
+    amber: Color32::from_rgb(0xd9, 0x77, 0x06),
     is_dark: false,
 };
 
