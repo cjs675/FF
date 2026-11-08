@@ -645,18 +645,23 @@ impl eframe::App for FfShell {
             if open_with_requested {
                 self.open_with_selected();
             } else if !self.filter_focused {
+                let no_modifiers = !ctx.input(|i| i.modifiers.any());
                 if pressed(Key::Slash) {
                     self.filter_focus_request = true;
-                } else if pressed(Key::ArrowUp) {
+                } else if pressed(Key::ArrowUp) || (no_modifiers && pressed(Key::K)) {
                     if self.selection > 0 {
                         self.selection -= 1;
                         self.pin_anchor();
                     }
-                } else if pressed(Key::ArrowDown) {
+                } else if pressed(Key::ArrowDown) || (no_modifiers && pressed(Key::J)) {
                     if self.selection + 1 < self.display.len() {
                         self.selection += 1;
                         self.pin_anchor();
                     }
+                } else if no_modifiers && pressed(Key::H) {
+                    self.go_back();
+                } else if no_modifiers && pressed(Key::L) {
+                    self.enter_selected();
                 } else if pressed(Key::Home) {
                     if !self.display.is_empty() {
                         self.selection = 0;
