@@ -2,19 +2,27 @@
 //! The frame's only contact with the filesystem is the non-blocking drain
 //! inside `scanner.poll` — syscalls are structurally off the UI thread.
 //! The selection is anchored by NAME across listing refreshes (raw first
-//! batch to sorted completion), which is the machinery the watcher will
-//! reuse next milestone.
+//! batch to sorted completion), which is the machinery the watcher reuses
+//! and session restore too: the last dir + selection come back on relaunch,
+//! delegated through the worker (reads and debounced writes both).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use egui::{CentralPanel, Key, Panel, RichText, ScrollArea, TextEdit, Ui, ViewportCommand};
+use ff_core::cfg::{self, Config};
 use ff_core::find::{FileFinder, PortableFilter};
 use ff_core::model::Entry;
 use ff_core::scan::{DirSource, FsEngine};
+use ff_core::session::{self, SessionState};
 
-use crate::theme;
+use crate::theme::{self, Palette};
 
 pub struct FfShell {
+    #[allow(dead_code)]
+    pub config: Config,
+    pub config_warnings: Vec<String>,
+    pub palette: Palette,
     scanner: FsEngine,
     finder: PortableFilter,
     cwd: PathBuf,
@@ -31,20 +39,40 @@ pub struct FfShell {
     filter_focus_request: bool,
     filter_focused: bool,
     pointer_over_interactive: bool,
+    /// Where the session file lives (`None` = persistence disabled).
+    session_path: Option<PathBuf>,
+    /// Last state we handed the engine for persisting (dedupe per frame).
+    last_saved: Option<SessionState>,
+    /// One-shot request to scroll the restored selection into view.
+    pending_scroll: bool,
 }
 
 impl FfShell {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
+        let (config, config_warnings) = match cfg::default_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+            Some(contents) => cfg::parse(&contents),
+            None => (Config::default(), Vec::new()),
+        };
 
-        let cwd = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let palette = theme::palette_for(&config.theme);
+        theme::apply(&cc.egui_ctx, palette);
+
+        // Placeholder cwd (`""`): the shell parks at an empty in-memory dir
+        // until the worker delivers the restored (or default home) state —
+        // including last-session selection, anchored by name.
+        let session_path = session::default_path();
+
+        let ctx = cc.egui_ctx.clone();
+        let waker = Arc::new(move || ctx.request_repaint());
+        let scanner = FsEngine::launch_with_waker(config.show_hidden, session_path.clone(), Some(waker));
 
         Self {
-            scanner: FsEngine::launch(false),
+            config,
+            config_warnings,
+            palette,
+            scanner,
             finder: PortableFilter,
-            cwd,
+            cwd: PathBuf::new(),
             entries: Vec::new(),
             display: Vec::new(),
             anchor: None,
@@ -54,7 +82,25 @@ impl FfShell {
             filter_focus_request: false,
             filter_focused: false,
             pointer_over_interactive: false,
+            session_path,
+            last_saved: None,
+            pending_scroll: false,
         }
+    }
+
+    /// Applies the worker's restored state: navigate to the last dir, keep
+    /// the selection by NAME (the anchor machinery re-seats the index once
+    /// the listing arrives), request one scroll-into-view. Any saved state
+    /// is marked as already persisted to avoid a redundant immediate write.
+    fn apply_restore(&mut self, state: SessionState) {
+        self.last_saved = Some(state.clone());
+        self.cwd = state.cwd;
+        self.entries.clear();
+        self.display.clear();
+        self.selection = 0;
+        self.anchor = state.selection;
+        self.filter.clear();
+        self.pending_scroll = true;
     }
 
     fn descend(&mut self, name: &str) {
@@ -65,14 +111,13 @@ impl FfShell {
     }
 
     fn parent(&mut self) {
-        if let Some(parent) = self.cwd.parent() {
-            if parent != self.cwd {
+        if let Some(parent) = self.cwd.parent()
+            && parent != self.cwd {
                 self.cwd = parent.to_path_buf();
                 self.selection = 0;
                 self.anchor = None;
                 self.filter.clear();
             }
-        }
     }
 
     /// Selection change => re-pin the anchor to the entry now selected.
@@ -98,12 +143,27 @@ impl FfShell {
     }
 
     fn descend_selected(&mut self) {
-        if let Some(entry) = self.display.get(self.selection) {
-            if entry.is_dir() {
+        if let Some(entry) = self.display.get(self.selection)
+            && entry.is_dir() {
                 let name = entry.name.clone();
                 self.descend(&name);
             }
+    }
+
+    pub fn save_session(&self) {
+        if let Some(path) = &self.session_path {
+            let state = SessionState {
+                cwd: self.cwd.clone(),
+                selection: self.anchor.clone(),
+            };
+            let _ = session::save(path, &state);
         }
+    }
+}
+
+impl Drop for FfShell {
+    fn drop(&mut self) {
+        self.save_session();
     }
 }
 
@@ -113,7 +173,14 @@ impl eframe::App for FfShell {
         let previous_selection = self.selection;
 
         // 1. Poll the engine: drain events, reconcile, refresh listing.
-        let listing = self.scanner.poll(&self.cwd);
+        let mut listing = self.scanner.poll(&self.cwd);
+
+        // 2. First arrival of the restored (or default home) state: switch
+        //    to that directory instantly, within this same frame.
+        if let Some(state) = self.scanner.take_restored() {
+            self.apply_restore(state);
+            listing = self.scanner.poll(&self.cwd);
+        }
         self.entries = listing.entries;
         self.listing_loading = !listing.complete;
 
@@ -152,6 +219,17 @@ impl eframe::App for FfShell {
         }
         let selection_moved = self.selection != previous_selection;
 
+        // 4. Session persistence: hand the state to the worker whenever it
+        //    changed (debounced write there — never this thread).
+        let current = SessionState {
+            cwd: self.cwd.clone(),
+            selection: self.display.get(self.selection).map(|e| e.name.clone()),
+        };
+        if self.last_saved.as_ref() != Some(&current) {
+            self.scanner.persist(current.clone());
+            self.last_saved = Some(current);
+        }
+
         self.pointer_over_interactive = false;
 
         // --- bottom: debug status line (v1 replaces it with the hairline)
@@ -161,7 +239,7 @@ impl eframe::App for FfShell {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     let path = format!("[{}]", self.cwd.display());
-                    ui.label(RichText::new(path).color(theme::MUTED).size(11.0));
+                    ui.label(RichText::new(path).color(self.palette.muted).size(11.0));
                     let mut note = format!(" {} items", self.display.len());
                     if self.listing_loading {
                         note.push_str("  |  loading");
@@ -171,7 +249,10 @@ impl eframe::App for FfShell {
                     if !self.filter.is_empty() {
                         note.push_str("  |  filter");
                     }
-                    ui.label(RichText::new(note).color(theme::MUTED).size(11.0));
+                    if !self.config_warnings.is_empty() {
+                        note.push_str(&format!("  |  cfg: {} warn", self.config_warnings.len()));
+                    }
+                    ui.label(RichText::new(note).color(self.palette.muted).size(11.0));
                 });
             });
 
@@ -204,7 +285,7 @@ impl eframe::App for FfShell {
                     } else {
                         "no matches"
                     })
-                    .color(theme::MUTED),
+                    .color(self.palette.muted),
                 );
                 return;
             }
@@ -222,9 +303,9 @@ impl eframe::App for FfShell {
                     for (i, (name, is_dir)) in rows.iter().enumerate() {
                         let selected = i == self.selection;
                         let text = RichText::new(name.clone()).color(if *is_dir {
-                            theme::ACCENT
+                            self.palette.accent
                         } else {
-                            theme::FG
+                            self.palette.fg
                         });
                         let resp = ui.selectable_label(selected, text);
                         self.pointer_over_interactive |= resp.hovered();
@@ -240,7 +321,7 @@ impl eframe::App for FfShell {
                             }
                             // file open lands with the opener work (v0.5)
                         }
-                        if selected && selection_moved {
+                        if selected && (selection_moved || self.pending_scroll) {
                             resp.scroll_to_me(None);
                         }
                     }
@@ -252,5 +333,17 @@ impl eframe::App for FfShell {
         if press && !self.pointer_over_interactive {
             ctx.send_viewport_cmd(ViewportCommand::StartDrag);
         }
+
+        // Restored-scroll is one-shot: consume once rows were displaying.
+        if self.pending_scroll && !self.display.is_empty() {
+            self.pending_scroll = false;
+        }
+    }
+
+    /// Guaranteed final save. Runs after the render loop is gone — outside
+    /// any frame — so the no-block-on-disk invariant (PLAN §1) still holds;
+    /// the worker's debounced writes cover everything until this moment.
+    fn on_exit(&mut self) {
+        self.save_session();
     }
 }

@@ -9,15 +9,17 @@
 //!   the current ticket are dropped, so fast navigation never mixes trees.
 //! - **Neighbor warm cache:** completed listings warm their subdirectories
 //!   (bounded) so descending hits an instant cached listing.
+//! - **Session IO:** last-session state is read once at worker start
+//!   (shipped as `Restored`) and written from the worker with a debounce
+//!   (`Persist`). The frame never touches the state file.
 //!
-//! Everything here is std-only by design; `notify` rides in with the
-//! watcher milestone.
+//! std-only except `notify` for the watcher.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +27,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::{DirSource, Listing, sort_entries};
 use crate::model::{Entry, EntryKind};
+use crate::session::{self, SessionState};
 
 /// Paint this many entries immediately, unsorted, while the rest reads.
 const FIRST_BATCH: usize = 96;
@@ -36,6 +39,8 @@ const CACHE_CAP: usize = 256;
 const WATCH_QUIET: Duration = Duration::from_millis(150);
 /// Worker loop cadence for watcher drain + flush.
 const WATCH_POLL: Duration = Duration::from_millis(60);
+/// Debounce: session writes coalesce after this quiet window.
+const PERSIST_QUIET: Duration = Duration::from_millis(300);
 
 pub(crate) enum Work {
     Scan {
@@ -49,6 +54,10 @@ pub(crate) enum Work {
     /// `dir` is the scan key the UI knows; canonicalization happens here.
     Watch {
         dir: PathBuf,
+    },
+    /// Store the session state; the worker debounces and writes it.
+    Persist {
+        state: SessionState,
     },
 }
 
@@ -74,7 +83,14 @@ pub(crate) enum ScanEvent {
     Dirty {
         dir: PathBuf,
     },
+    /// Sent once at worker start: the restored last-session state, or the
+    /// default home state when no usable session file exists.
+    Restored {
+        state: SessionState,
+    },
 }
+
+pub type RepaintWaker = Arc<dyn Fn() + Send + Sync>;
 
 fn kind_of(t: fs::FileType) -> EntryKind {
     if t.is_dir() {
@@ -120,13 +136,40 @@ fn read_entries(
     Ok(all)
 }
 
-fn spawn_worker(show_hidden: bool) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEvent>) {
+fn spawn_worker(
+    show_hidden: bool,
+    session_path: Option<PathBuf>,
+    waker: Option<RepaintWaker>,
+) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEvent>) {
     let (work_tx, work_rx) = mpsc::channel::<Work>();
     let (event_tx, event_rx) = mpsc::channel::<ScanEvent>();
 
     thread::Builder::new()
         .name("ff-scan".into())
         .spawn(move || {
+            let send_event = {
+                let event_tx = event_tx;
+                let waker = waker;
+                move |event: ScanEvent| {
+                    let res = event_tx.send(event);
+                    if let Some(w) = &waker {
+                        w();
+                    }
+                    res
+                }
+            };
+
+            // Session restore is pure worker IO: the state file is read
+            // here, and exactly one `Restored` event ships at start (with
+            // the default home state when there is nothing usable).
+            let restored_state = session_path
+                .as_deref()
+                .and_then(session::load)
+                .unwrap_or_else(session::default_state);
+            let _ = send_event(ScanEvent::Restored {
+                state: restored_state,
+            });
+
             // The native filesystem backend (FSEvents / inotify /
             // ReadDirectoryChangesW) lives wholly on this thread: watcher
             // creation, canonicalization, un/watch work, event handling.
@@ -139,12 +182,15 @@ fn spawn_worker(show_hidden: bool) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEv
             // scan key -> Instant of the latest dirtiness; flushes when the
             // quiet window elapses so event storms cannot cause scan storms.
             let mut dirty_since: HashMap<PathBuf, Instant> = HashMap::new();
+            // (latest state, write-after Instant): re-set on every Persist,
+            // so a burst of user activity coalesces into one write.
+            let mut pending_persist: Option<(SessionState, Instant)> = None;
 
             loop {
                 // A. Drain watcher events (non-blocking), coalesce.
                 let watch_target = watched.clone();
-                if watch_target.is_some() {
-                    if let Some((_, rx)) = watcher.as_ref() {
+                if watch_target.is_some()
+                    && let Some((_, rx)) = watcher.as_ref() {
                         while let Ok(received) = rx.try_recv() {
                             let Ok(event) = received else {
                                 continue;
@@ -156,17 +202,16 @@ fn spawn_worker(show_hidden: bool) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEv
                                 let Ok(event_dir) = std::fs::canonicalize(event_dir) else {
                                     continue;
                                 };
-                                if let Some((scan_key, canonical)) = watch_target.as_ref() {
-                                    if event_dir == *canonical {
+                                if let Some((scan_key, canonical)) = watch_target.as_ref()
+                                    && event_dir == *canonical {
                                         dirty_since.insert(scan_key.clone(), Instant::now());
                                     }
-                                }
                             }
                         }
                     }
-                }
 
-                // B. Flush directories that stayed quiet past the window.
+                // B. Flush quiet windows: dirty directories (as Dirt events)
+                //    and debounced session writes.
                 let now = Instant::now();
                 let flush: Vec<PathBuf> = dirty_since
                     .iter()
@@ -175,15 +220,22 @@ fn spawn_worker(show_hidden: bool) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEv
                     .collect();
                 for dir in flush {
                     dirty_since.remove(&dir);
-                    let _ = event_tx.send(ScanEvent::Dirty { dir });
+                    let _ = send_event(ScanEvent::Dirty { dir });
                 }
+                if let Some((state, at)) = &mut pending_persist
+                    && now >= *at {
+                        if let Some(path) = &session_path {
+                            let _ = session::save(path, state);
+                        }
+                        pending_persist = None;
+                    }
 
                 // C. Accept work; watcher drains happen each loop rotation.
                 match work_rx.recv_timeout(WATCH_POLL) {
                     Ok(work) => match work {
                         Work::Scan { ticket, dir } => {
                             let mut send_batch = |batch: Vec<Entry>| {
-                                let _ = event_tx.send(ScanEvent::Batch {
+                                let _ = send_event(ScanEvent::Batch {
                                     ticket,
                                     entries: batch,
                                 });
@@ -191,14 +243,14 @@ fn spawn_worker(show_hidden: bool) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEv
                             match read_entries(&dir, show_hidden, &mut send_batch) {
                                 Ok(mut entries) => {
                                     sort_entries(&mut entries);
-                                    let _ = event_tx.send(ScanEvent::Ready {
+                                    let _ = send_event(ScanEvent::Ready {
                                         ticket,
                                         dir,
                                         entries,
                                     });
                                 }
                                 Err(e) => {
-                                    let _ = event_tx.send(ScanEvent::Failed {
+                                    let _ = send_event(ScanEvent::Failed {
                                         ticket,
                                         reason: e.to_string(),
                                     });
@@ -211,21 +263,25 @@ fn spawn_worker(show_hidden: bool) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEv
                                 read_entries(&dir, show_hidden, &mut send_batch)
                             {
                                 sort_entries(&mut entries);
-                                let _ = event_tx.send(ScanEvent::Ready {
+                                let _ = send_event(ScanEvent::Ready {
                                     ticket: u64::MAX, // warm fills carry no live ticket
                                     dir,
                                     entries,
                                 });
                             }
                         }
+                        Work::Persist { state } => {
+                            // Coalesced: each successive state replaces the
+                            // pending one and restarts the quiet window.
+                            pending_persist = Some((state, Instant::now() + PERSIST_QUIET));
+                        }
                         Work::Watch { dir } => {
                             // Tear down the previous target so watchers never
                             // accumulate across navigation.
-                            if let Some((_, old_canonical)) = watched.take() {
-                                if let Some((w, _)) = watcher.as_mut() {
+                            if let Some((_, old_canonical)) = watched.take()
+                                && let Some((w, _)) = watcher.as_mut() {
                                     let _ = w.unwatch(&old_canonical);
                                 }
-                            }
                             // A failed canonicalize just means no
                             // auto-refresh for this dir; scanning still works.
                             match std::fs::canonicalize(&dir) {
@@ -281,11 +337,41 @@ pub struct FsEngine {
     cache: HashMap<PathBuf, Vec<Entry>>,
     warms_inflight: HashSet<PathBuf>,
     error: Option<String>,
+    /// Restored session state, buffered one-shot until the shell consumes it.
+    /// The worker always ships exactly one `Restored` at start, so `take`
+    /// returning `None` simply means "not yet arrived / already applied".
+    restored: Option<SessionState>,
 }
 
 impl FsEngine {
     pub fn launch(show_hidden: bool) -> Self {
-        let (work_tx, events) = spawn_worker(show_hidden);
+        Self::launch_with_options(show_hidden, None, None)
+    }
+
+    /// `session_path` points at the last-session state file (`None`
+    /// disables session persistence — used by tests and degraded setups).
+    pub fn launch_with(show_hidden: bool, session_path: Option<PathBuf>) -> Self {
+        Self::launch_with_options(show_hidden, session_path, None)
+    }
+
+    pub fn with_waker(session_path: Option<PathBuf>, waker: RepaintWaker) -> Self {
+        Self::launch_with_options(false, session_path, Some(waker))
+    }
+
+    pub fn launch_with_waker(
+        show_hidden: bool,
+        session_path: Option<PathBuf>,
+        waker: Option<RepaintWaker>,
+    ) -> Self {
+        Self::launch_with_options(show_hidden, session_path, waker)
+    }
+
+    pub fn launch_with_options(
+        show_hidden: bool,
+        session_path: Option<PathBuf>,
+        waker: Option<RepaintWaker>,
+    ) -> Self {
+        let (work_tx, events) = spawn_worker(show_hidden, session_path, waker);
         Self {
             work_tx,
             events,
@@ -297,11 +383,24 @@ impl FsEngine {
             cache: HashMap::new(),
             warms_inflight: HashSet::new(),
             error: None,
+            restored: None,
         }
     }
 
     pub fn last_error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    /// Consumes the restored session state once it has arrived (the shell
+    /// applies it: cwd, selection anchor, scroll request).
+    pub fn take_restored(&mut self) -> Option<SessionState> {
+        self.restored.take()
+    }
+
+    /// Hands the current session state to the worker thread; writing is
+    /// debounced there (PERSIST_QUIET), so bursts of activity coalesce.
+    pub fn persist(&self, state: SessionState) {
+        let _ = self.work_tx.send(Work::Persist { state });
     }
 
     fn enqueue_warm(&mut self, dir: PathBuf) {
@@ -345,6 +444,9 @@ impl DirSource for FsEngine {
                         self.queued = false;
                     }
                 }
+                ScanEvent::Restored { state } => {
+                    self.restored = Some(state);
+                }
                 ScanEvent::Dirty { dir } => {
                     // Live dir dirtiness: force a fresh authoritative listing
                     // on the next poll. The anchor keeps the user's selection
@@ -359,6 +461,13 @@ impl DirSource for FsEngine {
                 }
                 _ => {} // stale ticket, dropped
             }
+        }
+
+        // Placeholder: an empty path means "not navigated yet" — the shell
+        // parks here until the restored (or default home) state names a real
+        // directory. Never enqueue scans or watches for nothing.
+        if dir.as_os_str().is_empty() {
+            return Listing::default();
         }
 
         // 2. Directory switch: reset the live scheme under a fresh ticket,
@@ -480,7 +589,7 @@ mod tests {
         let mut engine = FsEngine::launch(false);
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let listing = engine.poll(&missing);
+            let _ = engine.poll(&missing);
             if engine.last_error().is_some() {
                 break;
             }
@@ -526,5 +635,103 @@ mod tests {
             "watch refresh must not produce errors"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn restore_ships_default_when_no_session_file() {
+        let mut engine = FsEngine::launch(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = engine.poll(Path::new(""));
+            if let Some(state) = engine.take_restored() {
+                assert_eq!(state, session::default_state());
+                break;
+            }
+            assert!(Instant::now() < deadline, "restore event missed");
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn restore_reads_last_session_and_worker_persists_changes() {
+        let data = temp_root("session-data");
+        let listed = temp_root("session-dir");
+        fs::write(listed.join("a.txt"), "").unwrap();
+        fs::write(listed.join("b.txt"), "").unwrap();
+        let state_path = data.join("session");
+        session::save(
+            &state_path,
+            &SessionState {
+                cwd: listed.clone(),
+                selection: Some("b.txt".into()),
+            },
+        )
+        .unwrap();
+
+        let mut engine = FsEngine::launch_with(false, Some(state_path.clone()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let restored = loop {
+            let _ = engine.poll(Path::new(""));
+            if let Some(state) = engine.take_restored() {
+                break state;
+            }
+            assert!(Instant::now() < deadline, "restore not delivered in time");
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(
+            restored,
+            SessionState {
+                cwd: listed.clone(),
+                selection: Some("b.txt".into())
+            }
+        );
+
+        // Navigating to the restored dir shows its contents.
+        let listing = wait_complete(&mut engine, &listed);
+        assert!(listing.entries.iter().any(|e| e.name == "b.txt"));
+
+        // User activity persists through the worker (debounced write).
+        let next = SessionState {
+            cwd: listed.clone(),
+            selection: Some("a.txt".into()),
+        };
+        engine.persist(next.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if session::load(&state_path) == Some(next.clone()) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "persist write not flushed in time"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = fs::remove_dir_all(&data);
+        let _ = fs::remove_dir_all(&listed);
+    }
+
+    #[test]
+    fn waker_is_invoked_on_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&wake_count);
+        let waker = Arc::new(move || {
+            count_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut engine = FsEngine::launch_with_waker(false, None, Some(waker));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = engine.poll(Path::new(""));
+            if engine.take_restored().is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for restore event");
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(wake_count.load(Ordering::SeqCst) > 0);
     }
 }

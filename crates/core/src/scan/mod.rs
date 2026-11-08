@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::model::Entry;
 
-pub use fs::FsEngine;
+pub use fs::{FsEngine, RepaintWaker};
 
 /// What the shell renders per frame for some directory. `complete` marks an
 /// authoritative listing (cache or fully read+sorted); when false the

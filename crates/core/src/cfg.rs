@@ -6,6 +6,9 @@
 //! - comments: whole-line `# ...` and inline trailing `# ...`
 //! - `keybind` is repeatable; value shape is `combo=action`
 
+use std::env;
+use std::path::PathBuf;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Launch {
     #[default]
@@ -22,6 +25,7 @@ pub struct Config {
     pub search: String,
     pub content: String,
     pub launch: Launch,
+    pub show_hidden: bool,
     pub keybinds: Vec<(String, String)>,
 }
 
@@ -34,9 +38,31 @@ impl Default for Config {
             search: "auto".into(),
             content: "auto".into(),
             launch: Launch::Session,
+            show_hidden: false,
             keybinds: Vec::new(),
         }
     }
+}
+
+/// Resolves standard config path for the platform:
+/// - macOS / Linux: `$XDG_CONFIG_HOME/ff/config` or `~/.config/ff/config`
+/// - Windows: `%APPDATA%\ff\config`
+pub fn default_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)?;
+
+    if cfg!(target_os = "windows") {
+        let base = env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Roaming"));
+        return Some(base.join("ff").join("config"));
+    }
+
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    Some(base.join("ff").join("config"))
 }
 
 /// Parses config text; returns config + warnings. Never hard-fails.
@@ -95,6 +121,11 @@ pub fn parse(src: &str) -> (Config, Vec<String>) {
                     "line {line_no}: `launch` wants session|frequents|home, got `{value}`"
                 )),
             },
+            "show_hidden" => match value {
+                "true" => cfg.show_hidden = true,
+                "false" => cfg.show_hidden = false,
+                _ => warnings.push(format!("line {line_no}: `show_hidden` wants true|false, got `{value}`")),
+            },
             "keybind" => match value.split_once('=') {
                 Some((combo, action)) => cfg
                     .keybinds
@@ -147,5 +178,27 @@ mod tests {
         let (cfg, warnings) = parse("search = spotlight\n");
         assert_eq!(cfg.search, "auto");
         assert!(warnings.iter().any(|w| w.contains("`search`")));
+    }
+
+    #[test]
+    fn parses_show_hidden() {
+        let (cfg, warnings) = parse("show_hidden = true\n");
+        assert!(cfg.show_hidden);
+        assert!(warnings.is_empty());
+
+        let (cfg, warnings) = parse("show_hidden = false\n");
+        assert!(!cfg.show_hidden);
+        assert!(warnings.is_empty());
+
+        let (cfg, warnings) = parse("show_hidden = maybe\n");
+        assert!(!cfg.show_hidden);
+        assert!(warnings.iter().any(|w| w.contains("`show_hidden`")));
+    }
+
+    #[test]
+    fn default_path_points_to_config_file() {
+        if let Some(path) = default_path() {
+            assert!(path.ends_with("ff/config") || path.ends_with("ff\\config"));
+        }
     }
 }
