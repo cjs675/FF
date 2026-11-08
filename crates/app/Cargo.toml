@@ -12,6 +12,7 @@ path = "src/main.rs"
 eframe = "0.37.0"
 egui = "0.37.0"
 ff-core = { path = "../core" }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy", "parsing"] }
 
 [features]
 default = ["fsearch-macos"]

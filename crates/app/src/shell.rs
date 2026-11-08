@@ -91,6 +91,16 @@ pub struct FfShell {
     vim_count: Option<usize>,
     /// Pending Vim `g` prefix (e.g. first `g` in `gg`).
     vim_pending_g: bool,
+    /// Whether the in-window Peek preview pane is open.
+    pub preview_open: bool,
+    /// Active path inspected for peek preview.
+    peek_path: Option<PathBuf>,
+    /// Active peek payload delivered by the worker.
+    peek_payload: Option<ff_core::ops::peek::PeekPayload>,
+    /// Flag indicating peek request in flight.
+    peek_loading: bool,
+    /// Active GPU texture handle for image peek previews.
+    peek_texture: Option<egui::TextureHandle>,
 }
 
 
@@ -152,6 +162,8 @@ impl FfShell {
             }
         };
 
+        let preview_open = config.preview;
+
         Self {
             config,
             config_warnings,
@@ -184,6 +196,11 @@ impl FfShell {
             history_forward: Vec::new(),
             vim_count: None,
             vim_pending_g: false,
+            preview_open,
+            peek_path: None,
+            peek_payload: None,
+            peek_loading: false,
+            peek_texture: None,
         }
     }
 
@@ -563,6 +580,26 @@ impl eframe::App for FfShell {
             modal.selection = 0;
         }
 
+        while let Some((_ticket, path, payload)) = self.scanner.take_peek() {
+            if self.peek_path.as_ref() == Some(&path) {
+                if let ff_core::ops::peek::PeekPayload::Image { width, height, rgba } = &payload {
+                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                        [*width as usize, *height as usize],
+                        rgba,
+                    );
+                    self.peek_texture = Some(ctx.load_texture(
+                        "peek_image",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                } else {
+                    self.peek_texture = None;
+                }
+                self.peek_payload = Some(payload);
+                self.peek_loading = false;
+            }
+        }
+
         // 2. First arrival of the restored (or default home) state: switch
         //    to that directory instantly, within this same frame.
         if let Some(state) = self.scanner.take_restored() {
@@ -580,6 +617,21 @@ impl eframe::App for FfShell {
         // 2. Recompute the filtered view, then re-seat the anchor.
         self.display = self.finder.filter(&self.entries, &self.filter);
         self.remap_selection();
+
+        if self.preview_open && !self.frequents_open {
+            let active_path = self.display.get(self.selection).map(|e| e.path.clone());
+            if active_path != self.peek_path {
+                self.peek_path = active_path.clone();
+                self.peek_payload = None;
+                self.peek_texture = None;
+                if let Some(path) = active_path {
+                    self.peek_loading = true;
+                    self.scanner.request_peek(path);
+                } else {
+                    self.peek_loading = false;
+                }
+            }
+        }
 
         // 3. Keys, before widgets so filter typing stays literal.
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
@@ -727,6 +779,10 @@ impl eframe::App for FfShell {
                     self.vim_count = None;
                     self.vim_pending_g = false;
                     self.filter_focus_request = true;
+                } else if pressed(Key::Space) {
+                    self.preview_open = !self.preview_open;
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                 } else if pressed(Key::ArrowUp) || (no_modifiers && pressed(Key::K)) {
                     self.vim_pending_g = false;
                     let count = self.vim_count.take().unwrap_or(1);
@@ -1036,6 +1092,49 @@ impl eframe::App for FfShell {
                             self.filter_focus_request = false;
                         }
                     }
+                });
+        }
+
+        // --- right: Peek preview pane (PLAN §2, §5 it25)
+        if self.preview_open && !self.frequents_open {
+            let border_color = self.palette.border;
+            Panel::right("peek_pane")
+                .resizable(true)
+                .default_size(360.0)
+                .min_size(220.0)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(self.palette.bg))
+                .show(ui, |ui| {
+                    let rect = ui.max_rect();
+                    ui.painter().line_segment(
+                        [rect.left_top(), rect.left_bottom()],
+                        egui::Stroke::new(1.0, border_color),
+                    );
+
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                        if let Some(path) = self.peek_path.as_ref() {
+                            let view = crate::peek::PeekView {
+                                path,
+                                payload: self.peek_payload.as_ref(),
+                                loading: self.peek_loading,
+                                texture: self.peek_texture.as_ref(),
+                                palette: &self.palette,
+                                theme_name: &self.config.theme,
+                                syntax_enabled: self.config.preview_syntax,
+                            };
+                            view.show(ui);
+                        } else {
+                            ui.add_space(16.0);
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    RichText::new("Select an item to preview")
+                                        .color(self.palette.muted)
+                                        .size(12.0),
+                                );
+                            });
+                        }
+                    });
                 });
         }
 
@@ -1427,6 +1526,11 @@ mod tests {
             history_forward: Vec::new(),
             vim_count: None,
             vim_pending_g: false,
+            preview_open: false,
+            peek_path: None,
+            peek_payload: None,
+            peek_loading: false,
+            peek_texture: None,
         };
 
         let state = SessionState {
@@ -1483,6 +1587,11 @@ mod tests {
             history_forward: Vec::new(),
             vim_count: None,
             vim_pending_g: false,
+            preview_open: false,
+            peek_path: None,
+            peek_payload: None,
+            peek_loading: false,
+            peek_texture: None,
         };
 
         // Navigate to dir_b
@@ -1567,6 +1676,11 @@ mod tests {
             history_forward: Vec::new(),
             vim_count: None,
             vim_pending_g: false,
+            preview_open: false,
+            peek_path: None,
+            peek_payload: None,
+            peek_loading: false,
+            peek_texture: None,
         };
 
         // 1. Initial selection at 0

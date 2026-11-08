@@ -80,6 +80,11 @@ pub(crate) enum Work {
         ticket: u64,
         dir: PathBuf,
     },
+    /// Load preview payload off-thread for the Peek pane.
+    Peek {
+        ticket: u64,
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +150,12 @@ pub(crate) enum ScanEvent {
     WatchDegraded {
         dir: PathBuf,
     },
+    /// Off-thread Peek payload delivered.
+    Peek {
+        ticket: u64,
+        path: PathBuf,
+        payload: crate::ops::peek::PeekPayload,
+    },
 }
 
 pub type RepaintWaker = Arc<dyn Fn() + Send + Sync>;
@@ -198,6 +209,7 @@ fn spawn_worker(
     session_path: Option<PathBuf>,
     waker: Option<RepaintWaker>,
     current_ticket: Arc<AtomicU64>,
+    peek_ticket: Arc<AtomicU64>,
 ) -> (mpsc::Sender<Work>, mpsc::Receiver<ScanEvent>) {
     let (work_tx, work_rx) = mpsc::channel::<Work>();
     let (event_tx, event_rx) = mpsc::channel::<ScanEvent>();
@@ -446,6 +458,18 @@ fn spawn_worker(
                                 }
                             }
                         }
+                        Work::Peek { ticket, path } => {
+                            if ticket == peek_ticket.load(Ordering::Relaxed) {
+                                let payload = crate::ops::peek::load_peek(&path);
+                                if ticket == peek_ticket.load(Ordering::Relaxed) {
+                                    let _ = send_event(ScanEvent::Peek {
+                                        ticket,
+                                        path,
+                                        payload,
+                                    });
+                                }
+                            }
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {} // drains happen next loop
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -464,6 +488,7 @@ pub struct FsEngine {
     events: mpsc::Receiver<ScanEvent>,
     ticket: u64,
     current_ticket: Arc<AtomicU64>,
+    peek_ticket: Arc<AtomicU64>,
     live_dir: PathBuf,
     live_entries: Vec<Entry>,
     /// Authoritative listing flag: false while loading/streaming, true after
@@ -485,6 +510,8 @@ pub struct FsEngine {
     dir_size: Option<u64>,
     /// Off-thread git repository branch and dirty status.
     git_status: Option<GitStatus>,
+    /// Off-thread Peek preview result (ticket, path, payload).
+    pending_peek: Option<(u64, PathBuf, crate::ops::peek::PeekPayload)>,
     /// Watcher health / coalescing status.
     watcher_state: WatcherState,
 }
@@ -518,12 +545,20 @@ impl FsEngine {
         waker: Option<RepaintWaker>,
     ) -> Self {
         let current_ticket = Arc::new(AtomicU64::new(0));
-        let (work_tx, events) = spawn_worker(show_hidden, session_path, waker, current_ticket.clone());
+        let peek_ticket = Arc::new(AtomicU64::new(0));
+        let (work_tx, events) = spawn_worker(
+            show_hidden,
+            session_path,
+            waker,
+            current_ticket.clone(),
+            peek_ticket.clone(),
+        );
         Self {
             work_tx,
             events,
             ticket: 0,
             current_ticket,
+            peek_ticket,
             live_dir: PathBuf::new(),
             live_entries: Vec::new(),
             ready: false,
@@ -536,6 +571,7 @@ impl FsEngine {
             pending_openers: None,
             dir_size: None,
             git_status: None,
+            pending_peek: None,
             watcher_state: WatcherState::Active,
         }
     }
@@ -570,6 +606,18 @@ impl FsEngine {
     /// Consumes any pending application opener query results delivered by the worker.
     pub fn take_openers(&mut self) -> Option<(PathBuf, Vec<AppOpener>)> {
         self.pending_openers.take()
+    }
+
+    /// Consumes any pending Peek preview payload delivered by the worker.
+    pub fn take_peek(&mut self) -> Option<(u64, PathBuf, crate::ops::peek::PeekPayload)> {
+        self.pending_peek.take()
+    }
+
+    /// Enqueues an off-thread Peek preview inspection request under a fresh peek ticket.
+    pub fn request_peek(&self, path: PathBuf) -> u64 {
+        let ticket = self.peek_ticket.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self.work_tx.send(Work::Peek { ticket, path });
+        ticket
     }
 
     /// Enqueues an off-thread application opener enumeration query stamped with current ticket.
@@ -684,6 +732,11 @@ impl DirSource for FsEngine {
                 ScanEvent::WatchDegraded { dir } if dir == self.live_dir => {
                     self.watcher_state = WatcherState::Degraded;
                 }
+                ScanEvent::Peek { ticket, path, payload }
+                    if ticket == self.peek_ticket.load(Ordering::Relaxed) =>
+                {
+                    self.pending_peek = Some((ticket, path, payload));
+                }
                 _ => {} // stale ticket, dropped
             }
         }
@@ -707,6 +760,7 @@ impl DirSource for FsEngine {
             self.error = None;
             self.pending_stats.clear();
             self.pending_openers = None;
+            self.pending_peek = None;
             self.dir_size = None;
             self.git_status = None;
             self.watcher_state = WatcherState::Active;
@@ -1083,6 +1137,37 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "git status timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn peek_pipeline_delivers_payload_off_thread() {
+        let root = temp_root("peek-pipeline");
+        let sample = root.join("hello.rs");
+        fs::write(&sample, "fn main() {}\n").unwrap();
+
+        let mut engine = FsEngine::launch(false);
+        let _ = wait_complete(&mut engine, &root);
+
+        let ticket = engine.request_peek(sample.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let _ = engine.poll(&root);
+            if let Some((t, p, payload)) = engine.take_peek() {
+                assert_eq!(t, ticket);
+                assert_eq!(p, sample);
+                match payload {
+                    crate::ops::peek::PeekPayload::FileText { content, .. } => {
+                        assert!(content.contains("fn main()"));
+                        break;
+                    }
+                    other => panic!("expected FileText, got {:?}", other),
+                }
+            }
+            assert!(Instant::now() < deadline, "peek pipeline timed out");
             thread::sleep(Duration::from_millis(5));
         }
 

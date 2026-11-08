@@ -92,9 +92,9 @@ pub fn parse(src: &str) -> (Config, Vec<String>) {
         match key {
             "theme" => cfg.theme = value.to_string(),
             "preview" => match value {
-                "true" => cfg.preview = true,
-                "false" => cfg.preview = false,
-                _ => warnings.push(format!("line {line_no}: `preview` wants true|false")),
+                "true" | "peek" => cfg.preview = true,
+                "false" | "off" => cfg.preview = false,
+                _ => warnings.push(format!("line {line_no}: `preview` wants peek|off (or true|false)")),
             },
             "preview.syntax" => match value {
                 "true" => cfg.preview_syntax = true,

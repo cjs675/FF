@@ -1,7 +1,7 @@
 # FF — Project Plan
 
 > Codename retired (it8): project is named **FF**. Repo dir `FF`; binary, crate and config identifier lowercase `ff`; display identity `FF`.
-> Status: **v0 complete; v0.5 complete** (it18 fsearch; it19 frequents; it20 nav history; it21 vim motions; it22 scroll tracking; it23 full vim motions; it24 single key focus). Plan rev: v16 (2026-11-08).
+> Status: **v0 complete; v0.5 complete** (it18 fsearch; it19 frequents; it20 nav history; it21 vim motions; it22 scroll tracking; it23 full vim motions; it24 single key focus; it25 peek pane). Plan rev: v17 (2026-11-08).
 > This file is the living plan. Iterations append to §History; sections above are replaced in place, never deleted retroactively.
 
 A cross-platform, chromeless, GPU-rendered file browser.
@@ -157,6 +157,7 @@ keybind              = cmd+shift+f=jump-to-volume
 - **it22 — Viewport tracking and virtual scroll coordinate sync.** Corrected desynchronized virtualized row target coordinates in `ScrollArea::show_rows` by computing relative offset against `row_range.start`, with instant `ScrollAnimation::none()` response on keyboard traversal (arrow keys, `j`/`k`, `PageUp`/`PageDown`, `Home`/`End`), ensuring the viewport faithfully follows the selection highlighter while keeping mouse/cursor selections and wheel browsing stable in place. Extended scroll tracking to Frequents view, Open With picker, and search filter navigation. All 42 workspace tests pass (42/42 green).
 - **it23 — Full Vim motion suite with numeric count prefixes and jumps.** Added numeric count prefixes (`<count>j` down, `<count>k` up, `<count><Down>`, `<count><Up>`), boundary jumps (`gg` to top or line count, `G` to bottom or line count, `0` to top, `$` to bottom, `Ctrl+d` half-page), Escape cancellation, tactile status hairline showcmd display, and test suite verification. All 43 workspace tests pass (43/43 green).
 - **it24 — Unification of row highlight to single key focus.** Eliminated competing secondary hover rectangle highlight under mouse cursor across directory listing, Frequents view, and Open With modal. Single highlight strictly follows active key focus, with mouse clicks continuing to cleanly set selection. All 43 workspace tests pass (43/43 green).
+- **it25 — In-window Peek pane with syntect syntax highlighting and image textures.** Implemented in-window right preview pane (`preview = peek | off`, toggled via `Space` in normal browsing). Core off-thread pipeline (`Work::Peek` and `ScanEvent::Peek`) reads head of file up to 128 KB with a 10 MB large-file guard, fast null-byte binary file detection, and async image decoding to raw RGBA via `image` crate (PNG, JPEG, WebP, GIF, ICO, BMP) with zero UI thread blocking. App layer integrates `syntect` syntax highlighting and theme parsing lazily via `OnceLock` (0 ms cold start overhead) using unified `egui::text::LayoutJob` monospace text spans with line numbering and gutter, GPU texture rendering for images preserving aspect ratio, and directory item count/size summary cards conforming to Dieter Rams Alabaster and Gruvbox themes. Dedicated monotonic ticket fencing prevents rapid navigation thrashing. All 47 workspace tests pass (47/47 green).
 
 
 
