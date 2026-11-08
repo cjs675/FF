@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use egui::{CentralPanel, Key, Panel, RichText, ScrollArea, TextEdit, Ui, ViewportCommand};
 use ff_core::cfg::{self, Config};
-use ff_core::find::{FileFinder, PortableFilter};
+use ff_core::find::{FileFinder, FsearchFinder, PortableFilter};
 use ff_core::model::{AppOpener, Entry, EntryStats};
 use ff_core::scan::{DirSource, FsEngine, WatcherState};
 use ff_core::session::{self, SessionState};
@@ -50,7 +50,7 @@ pub struct FfShell {
     pub config_warnings: Vec<String>,
     pub palette: Palette,
     scanner: FsEngine,
-    finder: PortableFilter,
+    finder: Box<dyn FileFinder>,
     cwd: PathBuf,
     /// Full listing for `cwd` as delivered by the engine.
     entries: Vec<Entry>,
@@ -99,12 +99,49 @@ impl FfShell {
         let waker = Arc::new(move || ctx.request_repaint());
         let scanner = FsEngine::launch_with_waker(config.show_hidden, session_path.clone(), Some(waker));
 
+        let mut config_warnings = config_warnings;
+        let finder: Box<dyn FileFinder> = match config.search.as_str() {
+            "fsearch" => {
+                #[cfg(all(target_os = "macos", feature = "fsearch-macos"))]
+                {
+                    Box::new(FsearchFinder::new())
+                }
+                #[cfg(not(all(target_os = "macos", feature = "fsearch-macos")))]
+                {
+                    config_warnings.push("search = fsearch configured, but fsearch is unavailable on this platform; falling back to portable".into());
+                    Box::new(PortableFilter)
+                }
+            }
+            "portable" => Box::new(PortableFilter),
+            "auto" => {
+                #[cfg(all(target_os = "macos", feature = "fsearch-macos"))]
+                {
+                    Box::new(FsearchFinder::new())
+                }
+                #[cfg(not(all(target_os = "macos", feature = "fsearch-macos")))]
+                {
+                    Box::new(PortableFilter)
+                }
+            }
+            other => {
+                config_warnings.push(format!("unknown search provider `{other}`, defaulting to auto"));
+                #[cfg(all(target_os = "macos", feature = "fsearch-macos"))]
+                {
+                    Box::new(FsearchFinder::new())
+                }
+                #[cfg(not(all(target_os = "macos", feature = "fsearch-macos")))]
+                {
+                    Box::new(PortableFilter)
+                }
+            }
+        };
+
         Self {
             config,
             config_warnings,
             palette,
             scanner,
-            finder: PortableFilter,
+            finder,
             cwd: PathBuf::new(),
             entries: Vec::new(),
             display: Vec::new(),
