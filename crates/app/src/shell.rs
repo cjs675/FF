@@ -87,6 +87,10 @@ pub struct FfShell {
     /// Navigation history stack for Back/Forward navigation.
     history_back: Vec<(PathBuf, Option<String>)>,
     history_forward: Vec<(PathBuf, Option<String>)>,
+    /// Pending Vim count prefix (e.g. `5` in `5j`).
+    vim_count: Option<usize>,
+    /// Pending Vim `g` prefix (e.g. first `g` in `gg`).
+    vim_pending_g: bool,
 }
 
 
@@ -178,6 +182,8 @@ impl FfShell {
             last_visited_cwd: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            vim_count: None,
+            vim_pending_g: false,
         }
     }
 
@@ -672,44 +678,152 @@ impl eframe::App for FfShell {
                 self.open_with_selected();
             } else if !self.filter_focused {
                 let no_modifiers = !ctx.input(|i| i.modifiers.any());
-                if pressed(Key::Slash) {
-                    self.filter_focus_request = true;
-                } else if pressed(Key::ArrowUp) || (no_modifiers && pressed(Key::K)) {
-                    if self.selection > 0 {
-                        self.selection -= 1;
+                let shift_only = ctx.input(|i| {
+                    i.modifiers.shift
+                        && !i.modifiers.command
+                        && !i.modifiers.ctrl
+                        && !i.modifiers.alt
+                });
+                let ctrl_only = ctx.input(|i| {
+                    i.modifiers.ctrl
+                        && !i.modifiers.command
+                        && !i.modifiers.shift
+                        && !i.modifiers.alt
+                });
+
+                let digit = if pressed(Key::Num1) {
+                    Some(1)
+                } else if pressed(Key::Num2) {
+                    Some(2)
+                } else if pressed(Key::Num3) {
+                    Some(3)
+                } else if pressed(Key::Num4) {
+                    Some(4)
+                } else if pressed(Key::Num5) {
+                    Some(5)
+                } else if pressed(Key::Num6) {
+                    Some(6)
+                } else if pressed(Key::Num7) {
+                    Some(7)
+                } else if pressed(Key::Num8) {
+                    Some(8)
+                } else if pressed(Key::Num9) {
+                    Some(9)
+                } else if pressed(Key::Num0) && self.vim_count.is_some() {
+                    Some(0)
+                } else {
+                    None
+                };
+
+                if no_modifiers && let Some(d) = digit {
+                    let current = self.vim_count.unwrap_or(0);
+                    self.vim_count = Some((current * 10 + d).min(999_999));
+                    self.vim_pending_g = false;
+                } else if no_modifiers && pressed(Key::Num0) {
+                    self.vim_pending_g = false;
+                    if !self.display.is_empty() {
+                        self.selection = 0;
                         self.pin_anchor();
                     }
+                } else if pressed(Key::Slash) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
+                    self.filter_focus_request = true;
+                } else if pressed(Key::ArrowUp) || (no_modifiers && pressed(Key::K)) {
+                    self.vim_pending_g = false;
+                    let count = self.vim_count.take().unwrap_or(1);
+                    self.selection = self.selection.saturating_sub(count);
+                    self.pin_anchor();
                 } else if pressed(Key::ArrowDown) || (no_modifiers && pressed(Key::J)) {
-                    if self.selection + 1 < self.display.len() {
-                        self.selection += 1;
+                    self.vim_pending_g = false;
+                    let count = self.vim_count.take().unwrap_or(1);
+                    if !self.display.is_empty() {
+                        self.selection = (self.selection + count).min(self.display.len() - 1);
                         self.pin_anchor();
                     }
                 } else if no_modifiers && pressed(Key::H) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                     self.go_back();
                 } else if no_modifiers && pressed(Key::L) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                     self.enter_selected();
+                } else if no_modifiers && pressed(Key::G) {
+                    if self.vim_pending_g {
+                        self.vim_pending_g = false;
+                        let count = self.vim_count.take();
+                        if !self.display.is_empty() {
+                            self.selection = match count {
+                                Some(c) => c.saturating_sub(1).min(self.display.len() - 1),
+                                None => 0,
+                            };
+                            self.pin_anchor();
+                        }
+                    } else {
+                        self.vim_pending_g = true;
+                    }
+                } else if shift_only && pressed(Key::G) {
+                    self.vim_pending_g = false;
+                    let count = self.vim_count.take();
+                    if !self.display.is_empty() {
+                        self.selection = match count {
+                            Some(c) => c.saturating_sub(1).min(self.display.len() - 1),
+                            None => self.display.len() - 1,
+                        };
+                        self.pin_anchor();
+                    }
+                } else if shift_only && pressed(Key::Num4) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
+                    if !self.display.is_empty() {
+                        self.selection = self.display.len() - 1;
+                        self.pin_anchor();
+                    }
+                } else if ctrl_only && pressed(Key::D) {
+                    self.vim_pending_g = false;
+                    let count = self.vim_count.take().unwrap_or(1);
+                    if !self.display.is_empty() {
+                        self.selection = (self.selection + count * 15).min(self.display.len() - 1);
+                        self.pin_anchor();
+                    }
                 } else if pressed(Key::Home) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                     if !self.display.is_empty() {
                         self.selection = 0;
                         self.pin_anchor();
                     }
                 } else if pressed(Key::End) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                     if !self.display.is_empty() {
                         self.selection = self.display.len() - 1;
                         self.pin_anchor();
                     }
                 } else if pressed(Key::PageUp) {
-                    self.selection = self.selection.saturating_sub(15);
+                    self.vim_pending_g = false;
+                    let count = self.vim_count.take().unwrap_or(1);
+                    self.selection = self.selection.saturating_sub(count * 15);
                     self.pin_anchor();
                 } else if pressed(Key::PageDown) {
+                    self.vim_pending_g = false;
+                    let count = self.vim_count.take().unwrap_or(1);
                     if !self.display.is_empty() {
-                        self.selection = (self.selection + 15).min(self.display.len() - 1);
+                        self.selection = (self.selection + count * 15).min(self.display.len() - 1);
                         self.pin_anchor();
                     }
                 } else if pressed(Key::Enter) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                     self.enter_selected();
                 } else if pressed(Key::Backspace) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                     self.parent();
+                } else if pressed(Key::Escape) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
                 }
             } else if pressed(Key::Escape) {
                 self.filter.clear(); // panel auto-hides, focus drops next frame
@@ -832,7 +946,23 @@ impl eframe::App for FfShell {
                 };
                 painter.circle_filled(dot_center, 3.0, dot_color);
 
-                if let Some(git) = self.scanner.git_status() {
+                let mut vim_cmd = String::new();
+                if let Some(c) = self.vim_count {
+                    vim_cmd.push_str(&c.to_string());
+                }
+                if self.vim_pending_g {
+                    vim_cmd.push('g');
+                }
+
+                if !vim_cmd.is_empty() {
+                    painter.text(
+                        egui::pos2(rect.max.x - 24.0, center_y),
+                        egui::Align2::RIGHT_CENTER,
+                        vim_cmd,
+                        egui::FontId::monospace(11.0),
+                        self.palette.accent,
+                    );
+                } else if let Some(git) = self.scanner.git_status() {
                     let git_text = if git.is_dirty {
                         format!("{} *", git.branch)
                     } else {
@@ -1301,6 +1431,8 @@ mod tests {
             last_visited_cwd: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            vim_count: None,
+            vim_pending_g: false,
         };
 
         let state = SessionState {
@@ -1355,6 +1487,8 @@ mod tests {
             last_visited_cwd: None,
             history_back: Vec::new(),
             history_forward: Vec::new(),
+            vim_count: None,
+            vim_pending_g: false,
         };
 
         // Navigate to dir_b
@@ -1397,6 +1531,91 @@ mod tests {
         shell.go_back();
         assert!(!shell.frequents_open);
         assert_eq!(shell.cwd, PathBuf::from("/root/dir_c"));
+    }
+
+    #[test]
+    fn test_vim_motions_with_count() {
+        let mut shell = FfShell {
+            config: Config::default(),
+            config_warnings: Vec::new(),
+            palette: crate::theme::palette_for("gruvbox-dark", None),
+            scanner: FsEngine::launch(false),
+            finder: Box::new(ff_core::find::PortableFilter),
+            cwd: PathBuf::from("/root"),
+            entries: Vec::new(),
+            display: (0..25)
+                .map(|i| Entry {
+                    name: format!("file_{i}.txt"),
+                    path: PathBuf::from(format!("/root/file_{i}.txt")),
+                    kind: ff_core::model::EntryKind::File,
+                })
+                .collect(),
+            anchor: None,
+            filter: String::new(),
+            selection: 0,
+            listing_loading: false,
+            filter_focus_request: false,
+            filter_focused: false,
+            pointer_over_interactive: false,
+            session_path: None,
+            last_saved: None,
+            pending_scroll: false,
+            stat_cache: HashMap::new(),
+            open_with_modal: None,
+            status_toast: None,
+            frequents: Vec::new(),
+            frequents_open: false,
+            frequents_selection: 0,
+            frequents_filter: String::new(),
+            frequents_focus_filter: false,
+            last_visited_cwd: None,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            vim_count: None,
+            vim_pending_g: false,
+        };
+
+        // 1. Initial selection at 0
+        assert_eq!(shell.selection, 0);
+
+        // 2. Count 5 + j moves down 5 lines
+        shell.vim_count = Some(5);
+        let count = shell.vim_count.take().unwrap_or(1);
+        shell.selection = (shell.selection + count).min(shell.display.len() - 1);
+        assert_eq!(shell.selection, 5);
+        assert_eq!(shell.vim_count, None);
+
+        // 3. Count 2 + k moves up 2 lines
+        shell.vim_count = Some(2);
+        let count = shell.vim_count.take().unwrap_or(1);
+        shell.selection = shell.selection.saturating_sub(count);
+        assert_eq!(shell.selection, 3);
+        assert_eq!(shell.vim_count, None);
+
+        // 4. Vim G without count jumps to bottom
+        let count = shell.vim_count.take();
+        shell.selection = match count {
+            Some(c) => c.saturating_sub(1).min(shell.display.len() - 1),
+            None => shell.display.len() - 1,
+        };
+        assert_eq!(shell.selection, 24);
+
+        // 5. Vim gg without count jumps to top
+        let count = shell.vim_count.take();
+        shell.selection = match count {
+            Some(c) => c.saturating_sub(1).min(shell.display.len() - 1),
+            None => 0,
+        };
+        assert_eq!(shell.selection, 0);
+
+        // 6. Vim 10gg jumps to line 10 (index 9)
+        shell.vim_count = Some(10);
+        let count = shell.vim_count.take();
+        shell.selection = match count {
+            Some(c) => c.saturating_sub(1).min(shell.display.len() - 1),
+            None => 0,
+        };
+        assert_eq!(shell.selection, 9);
     }
 }
 

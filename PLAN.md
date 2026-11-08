@@ -1,7 +1,7 @@
 # FF — Project Plan
 
 > Codename retired (it8): project is named **FF**. Repo dir `FF`; binary, crate and config identifier lowercase `ff`; display identity `FF`.
-> Status: **v0 complete; v0.5 complete** (it18 fsearch; it19 frequents; it20 nav history; it21 vim motions; it22 scroll tracking). Plan rev: v14 (2026-11-08).
+> Status: **v0 complete; v0.5 complete** (it18 fsearch; it19 frequents; it20 nav history; it21 vim motions; it22 scroll tracking; it23 full vim motions). Plan rev: v15 (2026-11-08).
 > This file is the living plan. Iterations append to §History; sections above are replaced in place, never deleted retroactively.
 
 A cross-platform, chromeless, GPU-rendered file browser.
@@ -155,6 +155,7 @@ keybind              = cmd+shift+f=jump-to-volume
 - **it20 — Navigation history, MX Master mouse back button and scroll clamp.** Disabled kinetic rubber-band overscroll (`rubber_band = false`) pinning text rows strictly to viewport bounds without exposing blank canvas on mouse/trackpad overscroll. Implemented bidirectional navigation history stack (`history_back` and `history_forward` preserving selection anchors) with graceful parent directory fallback when history is exhausted. Wired Logitech MX Master 3 and standard multi-button mouse back button (`PointerButton::Extra1`), forward button (`PointerButton::Extra2`), platform keyboard navigation (`Cmd+Left` / `Cmd+[` on macOS, `Ctrl+Left` / `Alt+Left` on Windows/Linux, and `Cmd+Right` / `Cmd+]` for forward) with text-focus guard. All 42 workspace tests pass (42/42 green).
 - **it21 — Vim-like motions (h, j, k, l).** Added modal-free Vim directional motions in `FfShell`: `j` moves selection down, `k` moves selection up, `h` navigates back along history (or ascends to parent), and `l` descends into directories or opens files. Motions are active in normal browsing mode with zero-modifier requirement (`!modifiers.any()`), cleanly coexisting with text typing when search filter focus is active. All 42 workspace tests pass (42/42 green).
 - **it22 — Viewport tracking and virtual scroll coordinate sync.** Corrected desynchronized virtualized row target coordinates in `ScrollArea::show_rows` by computing relative offset against `row_range.start`, with instant `ScrollAnimation::none()` response on keyboard traversal (arrow keys, `j`/`k`, `PageUp`/`PageDown`, `Home`/`End`), ensuring the viewport faithfully follows the selection highlighter while keeping mouse/cursor selections and wheel browsing stable in place. Extended scroll tracking to Frequents view, Open With picker, and search filter navigation. All 42 workspace tests pass (42/42 green).
+- **it23 — Full Vim motion suite with numeric count prefixes and jumps.** Added numeric count prefixes (`<count>j` down, `<count>k` up, `<count><Down>`, `<count><Up>`), boundary jumps (`gg` to top or line count, `G` to bottom or line count, `0` to top, `$` to bottom, `Ctrl+d` half-page), Escape cancellation, tactile status hairline showcmd display, and test suite verification. All 43 workspace tests pass (43/43 green).
 
 
 
