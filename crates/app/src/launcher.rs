@@ -106,6 +106,7 @@ impl LauncherAction {
 pub struct LauncherState {
     pub open: bool,
     pub query: String,
+    pub prev_query: String,
     pub mode: LauncherMode,
     pub selection: usize,
     pub focus_input: bool,
@@ -127,6 +128,7 @@ impl Default for LauncherState {
         Self {
             open: false,
             query: String::new(),
+            prev_query: String::new(),
             mode: LauncherMode::Files,
             selection: 0,
             focus_input: false,
@@ -157,6 +159,7 @@ impl LauncherState {
             self.selection = 0;
             self.focus_input = true;
             self.query.clear();
+            self.prev_query.clear();
             self.content_query.clear();
             self.content_results = None;
             self.peek_path = None;
@@ -236,6 +239,12 @@ impl LauncherState {
             self.selection = 0;
         }
 
+        // Reset selection when query changes
+        if self.query != self.prev_query {
+            self.selection = 0;
+            self.prev_query = self.query.clone();
+        }
+
         // Content search query debouncing
         if self.mode == LauncherMode::Content && self.query != self.content_query {
             self.content_query = self.query.clone();
@@ -250,8 +259,20 @@ impl LauncherState {
             }
         }
 
-        let all_actions = LauncherAction::all();
         let query_lower = self.query.trim().to_lowercase();
+
+        // 1. Files filtering
+        let matching_files: Vec<&Entry> = if self.mode == LauncherMode::Files {
+            filtered_entries
+                .iter()
+                .filter(|e| query_lower.is_empty() || e.name.to_lowercase().contains(&query_lower))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // 2. Actions filtering
+        let all_actions = LauncherAction::all();
         let filtered_actions: Vec<&LauncherAction> = if self.mode == LauncherMode::Actions {
             all_actions
                 .iter()
@@ -267,7 +288,7 @@ impl LauncherState {
 
         // Determine total item count for selection bounds
         let total_items = match self.mode {
-            LauncherMode::Files => filtered_entries.len(),
+            LauncherMode::Files => matching_files.len(),
             LauncherMode::Content => {
                 self.content_results.as_ref().map(|r| r.matches.len()).unwrap_or(0)
             }
@@ -288,7 +309,7 @@ impl LauncherState {
 
         // Determine currently active selected path for live peek preview
         let current_target_path: Option<PathBuf> = match self.mode {
-            LauncherMode::Files => filtered_entries.get(self.selection).map(|e| e.path.clone()),
+            LauncherMode::Files => matching_files.get(self.selection).map(|e| e.path.clone()),
             LauncherMode::Content => self
                 .content_results
                 .as_ref()
@@ -315,7 +336,7 @@ impl LauncherState {
         if submit {
             match self.mode {
                 LauncherMode::Files => {
-                    if let Some(entry) = filtered_entries.get(self.selection) {
+                    if let Some(entry) = matching_files.get(self.selection) {
                         outcome = LauncherOutcome::OpenPath(entry.path.clone());
                         self.open = false;
                     }
@@ -341,6 +362,30 @@ impl LauncherState {
         }
 
         let border_color = palette.border;
+
+        // Semi-transparent backdrop scrim (dimming the background window)
+        let screen_rect = ctx.viewport_rect();
+        let scrim_color = if palette.is_dark {
+            egui::Color32::from_black_alpha(120)
+        } else {
+            egui::Color32::from_black_alpha(45)
+        };
+
+        egui::Area::new(egui::Id::unique("command_launcher_backdrop"))
+            .order(egui::Order::Middle)
+            .fixed_pos(screen_rect.min)
+            .show(ctx, |ui| {
+                let (rect, resp) = ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
+                ui.painter().rect_filled(rect, 0.0, scrim_color);
+                if resp.clicked() {
+                    outcome = LauncherOutcome::Close;
+                }
+            });
+
+        if matches!(outcome, LauncherOutcome::Close) {
+            self.open = false;
+            return outcome;
+        }
 
         // Render Raycast-like floating HUD
         egui::Window::new("command_launcher_window")
@@ -452,74 +497,88 @@ impl LauncherState {
                     egui::Stroke::new(1.0, border_color),
                 );
 
-                // --- SPLIT VIEW: RESULTS (55%) + PREVIEW (45%) ---
-                let split_height = 384.0;
+                // --- SPLIT VIEW: RESULTS (52%) + PREVIEW (48%) ---
+                let split_height = 383.0;
                 let full_w = ui.available_width();
-                let left_w = (full_w * 0.55).round();
+                let left_w = (full_w * 0.52).round();
                 let right_w = full_w - left_w;
 
-                ui.allocate_ui(egui::vec2(full_w, split_height), |ui| {
-                    ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(full_w, split_height),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
                         // Left Results List
-                        ui.allocate_ui(egui::vec2(left_w, split_height), |ui| {
-                            ScrollArea::vertical()
-                                .auto_shrink([false, false])
-                                .show(ui, |ui| {
-                                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
+                        let left_out = ui.allocate_ui_with_layout(
+                            egui::vec2(left_w, split_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
 
-                                    match self.mode {
-                                        LauncherMode::Files => {
-                                            if filtered_entries.is_empty() {
-                                                ui.add_space(40.0);
-                                                ui.vertical_centered(|ui| {
-                                                    ui.label(
-                                                        RichText::new("No matching files found")
-                                                            .color(palette.muted)
-                                                            .size(12.0),
-                                                    );
-                                                });
-                                            } else {
-                                                for (i, entry) in filtered_entries.iter().enumerate() {
-                                                    let is_selected = i == self.selection;
-                                                    let row_h = 32.0;
-                                                    let (rect, resp) = ui.allocate_exact_size(
-                                                        egui::vec2(ui.available_width(), row_h),
-                                                        egui::Sense::click(),
-                                                    );
+                                        match self.mode {
+                                            LauncherMode::Files => {
+                                                if matching_files.is_empty() {
+                                                    ui.add_space(40.0);
+                                                    ui.vertical_centered(|ui| {
+                                                        ui.label(
+                                                            RichText::new("No matching files found")
+                                                                .color(palette.muted)
+                                                                .size(12.0),
+                                                        );
+                                                    });
+                                                } else {
+                                                    for (i, entry) in matching_files.iter().enumerate() {
+                                                        let is_selected = i == self.selection;
+                                                        let row_h = 30.0;
+                                                        let (rect, resp) = ui.allocate_exact_size(
+                                                            egui::vec2(ui.available_width(), row_h),
+                                                            egui::Sense::click(),
+                                                        );
 
-                                                    if is_selected {
-                                                        resp.scroll_to_me(None);
-                                                        ui.painter().rect_filled(rect, 4.0, palette.sel);
-                                                    }
+                                                        if is_selected {
+                                                            if select_up || select_down {
+                                                                resp.scroll_to_me(Some(egui::Align::Center));
+                                                            }
+                                                            ui.painter().rect_filled(rect, 4.0, palette.sel);
+                                                        }
 
-                                                    let display_name = if entry.is_dir() {
-                                                        format!("{}/", entry.name)
-                                                    } else {
-                                                        entry.name.clone()
-                                                    };
-                                                    let name_color = if entry.is_dir() {
-                                                        palette.accent
-                                                    } else {
-                                                        palette.fg
-                                                    };
+                                                        let display_name = if entry.is_dir() {
+                                                            format!("{}/", entry.name)
+                                                        } else {
+                                                            entry.name.clone()
+                                                        };
+                                                        let name_color = if entry.is_dir() {
+                                                            palette.accent
+                                                        } else {
+                                                            palette.fg
+                                                        };
 
-                                                    ui.painter().text(
-                                                        egui::pos2(rect.min.x + 8.0, rect.center().y),
-                                                        egui::Align2::LEFT_CENTER,
-                                                        &display_name,
-                                                        egui::FontId::proportional(12.5),
-                                                        name_color,
-                                                    );
+                                                        let max_chars = ((rect.width() - 20.0) / 7.5).max(10.0) as usize;
+                                                        let text_to_draw = if display_name.chars().count() > max_chars {
+                                                            crate::shell::truncate_middle(&display_name, max_chars)
+                                                        } else {
+                                                            display_name
+                                                        };
 
-                                                    if resp.clicked() {
-                                                        self.selection = i;
-                                                        outcome = LauncherOutcome::OpenPath(entry.path.clone());
-                                                        self.open = false;
+                                                        ui.painter().with_clip_rect(rect).text(
+                                                            egui::pos2(rect.min.x + 10.0, rect.center().y),
+                                                            egui::Align2::LEFT_CENTER,
+                                                            &text_to_draw,
+                                                            egui::FontId::proportional(12.5),
+                                                            name_color,
+                                                        );
+
+                                                        if resp.clicked() {
+                                                            self.selection = i;
+                                                            outcome = LauncherOutcome::OpenPath(entry.path.clone());
+                                                            self.open = false;
+                                                        }
                                                     }
                                                 }
                                             }
-                                        }
-                                        LauncherMode::Content => {
+                                            LauncherMode::Content => {
                                             if self.content_loading {
                                                 ui.add_space(40.0);
                                                 ui.vertical_centered(|ui| {
@@ -549,7 +608,9 @@ impl LauncherState {
                                                         );
 
                                                         if is_selected {
-                                                            resp.scroll_to_me(None);
+                                                            if select_up || select_down {
+                                                                resp.scroll_to_me(Some(egui::Align::Center));
+                                                            }
                                                             ui.painter().rect_filled(rect, 4.0, palette.sel);
                                                         }
 
@@ -559,11 +620,19 @@ impl LauncherState {
                                                             .map(|n| n.to_string_lossy().to_string())
                                                             .unwrap_or_else(|| mat.path.display().to_string());
 
+                                                        let row_painter = ui.painter().with_clip_rect(rect);
+
                                                         // Top row: Filename
-                                                        ui.painter().text(
-                                                            egui::pos2(rect.min.x + 8.0, rect.min.y + 12.0),
+                                                        let max_name_chars = ((rect.width() - 20.0) / 7.5).max(10.0) as usize;
+                                                        let name_to_draw = if file_name.chars().count() > max_name_chars {
+                                                            crate::shell::truncate_middle(&file_name, max_name_chars)
+                                                        } else {
+                                                            file_name
+                                                        };
+                                                        row_painter.text(
+                                                            egui::pos2(rect.min.x + 10.0, rect.min.y + 12.0),
                                                             egui::Align2::LEFT_CENTER,
-                                                            &file_name,
+                                                            &name_to_draw,
                                                             egui::FontId::proportional(12.0),
                                                             palette.fg,
                                                         );
@@ -571,15 +640,15 @@ impl LauncherState {
                                                         // Bottom row: L{line}: {snippet}
                                                         let line_badge = format!("L{}: ", mat.line_number);
                                                         let snippet = &mat.line_text;
-                                                        let max_len = 40;
+                                                        let max_len = 38;
                                                         let display_snippet = if snippet.chars().count() > max_len {
                                                             format!("{}...", &snippet[..snippet.char_indices().nth(max_len).map(|(idx, _)| idx).unwrap_or(snippet.len())])
                                                         } else {
                                                             snippet.clone()
                                                         };
 
-                                                        ui.painter().text(
-                                                            egui::pos2(rect.min.x + 8.0, rect.min.y + 28.0),
+                                                        row_painter.text(
+                                                            egui::pos2(rect.min.x + 10.0, rect.min.y + 28.0),
                                                             egui::Align2::LEFT_CENTER,
                                                             format!("{line_badge}{display_snippet}"),
                                                             egui::FontId::monospace(10.5),
@@ -624,12 +693,16 @@ impl LauncherState {
                                                     );
 
                                                     if is_selected {
-                                                        resp.scroll_to_me(None);
+                                                        if select_up || select_down {
+                                                            resp.scroll_to_me(Some(egui::Align::Center));
+                                                        }
                                                         ui.painter().rect_filled(rect, 4.0, palette.sel);
                                                     }
 
+                                                    let row_painter = ui.painter().with_clip_rect(rect);
+
                                                     // Title
-                                                    ui.painter().text(
+                                                    row_painter.text(
                                                         egui::pos2(rect.min.x + 10.0, rect.center().y),
                                                         egui::Align2::LEFT_CENTER,
                                                         action.title,
@@ -638,7 +711,7 @@ impl LauncherState {
                                                     );
 
                                                     // Category pill
-                                                    ui.painter().text(
+                                                    row_painter.text(
                                                         egui::pos2(rect.max.x - 70.0, rect.center().y),
                                                         egui::Align2::RIGHT_CENTER,
                                                         action.category,
@@ -647,7 +720,7 @@ impl LauncherState {
                                                     );
 
                                                     // Shortcut
-                                                    ui.painter().text(
+                                                    row_painter.text(
                                                         egui::pos2(rect.max.x - 8.0, rect.center().y),
                                                         egui::Align2::RIGHT_CENTER,
                                                         action.shortcut,
@@ -668,48 +741,63 @@ impl LauncherState {
                         });
 
                         // Vertical hairline divider between split panes
-                        let divider_x = ui.cursor().left();
+                        let divider_x = left_out.response.rect.right();
+                        let split_top = left_out.response.rect.top();
+                        let split_bottom = left_out.response.rect.bottom();
                         ui.painter().line_segment(
                             [
-                                egui::pos2(divider_x, ui.cursor().top()),
-                                egui::pos2(divider_x, ui.cursor().top() + split_height),
+                                egui::pos2(divider_x, split_top),
+                                egui::pos2(divider_x, split_bottom),
                             ],
                             egui::Stroke::new(1.0, border_color),
                         );
 
                         // Right Live Peek Preview
-                        ui.allocate_ui(egui::vec2(right_w, split_height), |ui| {
-                            if let Some(path) = &self.peek_path {
-                                let peek_view = PeekView {
-                                    path,
-                                    payload: self.peek_payload.as_ref(),
-                                    loading: self.peek_loading,
-                                    texture: self.peek_texture.as_ref(),
-                                    palette,
-                                    theme_name,
-                                    syntax_enabled: true,
-                                };
-                                peek_view.show(ui);
-                            } else {
-                                ui.add_space(80.0);
-                                ui.vertical_centered(|ui| {
-                                    ui.label(
-                                        RichText::new("Raycast Launcher")
-                                            .color(palette.muted)
-                                            .size(14.0)
-                                            .strong(),
-                                    );
-                                    ui.add_space(4.0);
-                                    ui.label(
-                                        RichText::new("Arrow through items to live preview")
-                                            .color(palette.label)
-                                            .size(11.5),
-                                    );
-                                });
-                            }
-                        });
-                    });
-                });
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(right_w, split_height),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                egui::Frame::NONE
+                                    .inner_margin(egui::Margin {
+                                        left: 12,
+                                        right: 12,
+                                        top: 10,
+                                        bottom: 8,
+                                    })
+                                    .show(ui, |ui| {
+                                        if let Some(path) = &self.peek_path {
+                                            let peek_view = PeekView {
+                                                path,
+                                                payload: self.peek_payload.as_ref(),
+                                                loading: self.peek_loading,
+                                                texture: self.peek_texture.as_ref(),
+                                                palette,
+                                                theme_name,
+                                                syntax_enabled: true,
+                                            };
+                                            peek_view.show(ui);
+                                        } else {
+                                            ui.add_space(80.0);
+                                            ui.vertical_centered(|ui| {
+                                                ui.label(
+                                                    RichText::new("Raycast Launcher")
+                                                        .color(palette.muted)
+                                                        .size(14.0)
+                                                        .strong(),
+                                                );
+                                                ui.add_space(4.0);
+                                                ui.label(
+                                                    RichText::new("Arrow through items to live preview")
+                                                        .color(palette.label)
+                                                        .size(11.5),
+                                                );
+                                            });
+                                        }
+                                    });
+                            },
+                        );
+                    },
+                );
 
                 // --- FOOTER BAR ---
                 let footer_height = 28.0;
@@ -728,7 +816,7 @@ impl LauncherState {
                             match self.mode {
                                 LauncherMode::Files => {
                                     ui.label(
-                                        RichText::new(format!("{} files", filtered_entries.len()))
+                                        RichText::new(format!("{} files", matching_files.len()))
                                             .color(palette.label)
                                             .size(10.5)
                                             .monospace(),
@@ -811,5 +899,28 @@ mod tests {
         assert!(actions.iter().any(|a| a.id == "new_file"));
         assert!(actions.iter().any(|a| a.id == "undo"));
         assert!(actions.iter().any(|a| a.id == "copy_path"));
+    }
+
+    #[test]
+    fn test_launcher_query_and_prefix_switching() {
+        let mut launcher = LauncherState {
+            open: true,
+            query: "?needle".to_string(),
+            ..Default::default()
+        };
+        if launcher.query.starts_with('?') {
+            launcher.mode = LauncherMode::Content;
+            launcher.query = launcher.query.trim_start_matches('?').trim_start().to_string();
+        }
+        assert_eq!(launcher.mode, LauncherMode::Content);
+        assert_eq!(launcher.query, "needle");
+
+        launcher.query = ">new".to_string();
+        if launcher.query.starts_with('>') {
+            launcher.mode = LauncherMode::Actions;
+            launcher.query = launcher.query.trim_start_matches('>').trim_start().to_string();
+        }
+        assert_eq!(launcher.mode, LauncherMode::Actions);
+        assert_eq!(launcher.query, "new");
     }
 }

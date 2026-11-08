@@ -21,7 +21,7 @@ use ff_core::session::{self, SessionState};
 use crate::launcher::{LauncherOutcome, LauncherState};
 use crate::theme::{self, Palette};
 
-fn truncate_middle(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate_middle(s: &str, max_len: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_len {
         s.to_string()
