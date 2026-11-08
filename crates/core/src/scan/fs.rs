@@ -85,6 +85,30 @@ pub(crate) enum Work {
         ticket: u64,
         path: PathBuf,
     },
+    /// Execute a filesystem operation off-thread.
+    FileOp {
+        op: FileOpRequest,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum FileOpRequest {
+    Trash { path: PathBuf },
+    Rename { from: PathBuf, to: PathBuf },
+    CreateFile { path: PathBuf },
+    CreateDir { path: PathBuf },
+    Undo(crate::ops::journal::UndoAction),
+}
+
+#[derive(Debug, Clone)]
+pub enum FileOpOutcome {
+    Trashed { original_path: PathBuf, trash_path: Option<PathBuf> },
+    Renamed { from: PathBuf, to: PathBuf },
+    CreatedFile { path: PathBuf },
+    CreatedDir { path: PathBuf },
+    RestoredTrash { path: PathBuf },
+    UndoneRename { from: PathBuf, to: PathBuf },
+    UndoneDelete { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +179,10 @@ pub(crate) enum ScanEvent {
         ticket: u64,
         path: PathBuf,
         payload: crate::ops::peek::PeekPayload,
+    },
+    /// Off-thread file operation outcome.
+    FileOp {
+        result: Result<FileOpOutcome, String>,
     },
 }
 
@@ -470,6 +498,69 @@ fn spawn_worker(
                                 }
                             }
                         }
+                        Work::FileOp { op, .. } => {
+                            let result = match op {
+                                FileOpRequest::Trash { path } => {
+                                    crate::ops::fs_ops::trash(&path).map(|trash_path| {
+                                        FileOpOutcome::Trashed {
+                                            original_path: path,
+                                            trash_path,
+                                        }
+                                    })
+                                }
+                                FileOpRequest::Rename { from, to } => {
+                                    crate::ops::fs_ops::rename(&from, &to).map(|()| {
+                                        FileOpOutcome::Renamed { from, to }
+                                    })
+                                }
+                                FileOpRequest::CreateFile { path } => {
+                                    crate::ops::fs_ops::create_file(&path).map(|()| {
+                                        FileOpOutcome::CreatedFile { path }
+                                    })
+                                }
+                                FileOpRequest::CreateDir { path } => {
+                                    crate::ops::fs_ops::create_dir(&path).map(|()| {
+                                        FileOpOutcome::CreatedDir { path }
+                                    })
+                                }
+                                FileOpRequest::Undo(action) => match action {
+                                    crate::ops::journal::UndoAction::RestoreTrash {
+                                        original_path,
+                                        trash_path,
+                                    } => {
+                                        if let Some(tpath) = trash_path {
+                                            crate::ops::fs_ops::restore_trash(&tpath, &original_path).map(|()| {
+                                                FileOpOutcome::RestoredTrash { path: original_path }
+                                            })
+                                        } else {
+                                            Err("Cannot restore: trash location was not recorded by system".to_string())
+                                        }
+                                    }
+                                    crate::ops::journal::UndoAction::Rename {
+                                        current,
+                                        original,
+                                    } => {
+                                        crate::ops::fs_ops::rename(&current, &original).map(|()| {
+                                            FileOpOutcome::UndoneRename {
+                                                from: current,
+                                                to: original,
+                                            }
+                                        })
+                                    }
+                                    crate::ops::journal::UndoAction::DeleteCreatedFile { path } => {
+                                        crate::ops::fs_ops::trash(&path).map(|_| {
+                                            FileOpOutcome::UndoneDelete { path }
+                                        })
+                                    }
+                                    crate::ops::journal::UndoAction::DeleteCreatedDir { path } => {
+                                        std::fs::remove_dir(&path)
+                                            .map(|()| FileOpOutcome::UndoneDelete { path })
+                                            .map_err(|e| format!("Failed to remove directory: {e}"))
+                                    }
+                                },
+                            };
+                            let _ = send_event(ScanEvent::FileOp { result });
+                        }
                     },
                     Err(mpsc::RecvTimeoutError::Timeout) => {} // drains happen next loop
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -512,6 +603,8 @@ pub struct FsEngine {
     git_status: Option<GitStatus>,
     /// Off-thread Peek preview result (ticket, path, payload).
     pending_peek: Option<(u64, PathBuf, crate::ops::peek::PeekPayload)>,
+    /// Off-thread file operation results delivered from the worker.
+    pending_file_ops: Vec<Result<FileOpOutcome, String>>,
     /// Watcher health / coalescing status.
     watcher_state: WatcherState,
 }
@@ -572,6 +665,7 @@ impl FsEngine {
             dir_size: None,
             git_status: None,
             pending_peek: None,
+            pending_file_ops: Vec::new(),
             watcher_state: WatcherState::Active,
         }
     }
@@ -611,6 +705,16 @@ impl FsEngine {
     /// Consumes any pending Peek preview payload delivered by the worker.
     pub fn take_peek(&mut self) -> Option<(u64, PathBuf, crate::ops::peek::PeekPayload)> {
         self.pending_peek.take()
+    }
+
+    /// Consumes any pending file operation results delivered by the background worker.
+    pub fn take_file_ops(&mut self) -> Vec<Result<FileOpOutcome, String>> {
+        std::mem::take(&mut self.pending_file_ops)
+    }
+
+    /// Enqueues an off-thread filesystem operation.
+    pub fn request_file_op(&self, op: FileOpRequest) {
+        let _ = self.work_tx.send(Work::FileOp { op });
     }
 
     /// Enqueues an off-thread Peek preview inspection request under a fresh peek ticket.
@@ -736,6 +840,9 @@ impl DirSource for FsEngine {
                     if ticket == self.peek_ticket.load(Ordering::Relaxed) =>
                 {
                     self.pending_peek = Some((ticket, path, payload));
+                }
+                ScanEvent::FileOp { result, .. } => {
+                    self.pending_file_ops.push(result);
                 }
                 _ => {} // stale ticket, dropped
             }
@@ -1168,6 +1275,40 @@ mod tests {
                 }
             }
             assert!(Instant::now() < deadline, "peek pipeline timed out");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn file_op_pipeline_executes_and_delivers_outcome() {
+        let root = temp_root("fileop-pipeline");
+        let new_file = root.join("created_via_worker.txt");
+
+        let mut engine = FsEngine::launch(false);
+        let _ = wait_complete(&mut engine, &root);
+
+        engine.request_file_op(FileOpRequest::CreateFile {
+            path: new_file.clone(),
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut created = false;
+        loop {
+            let _ = engine.poll(&root);
+            for op in engine.take_file_ops() {
+                if let Ok(FileOpOutcome::CreatedFile { path }) = op {
+                    assert_eq!(path, new_file);
+                    assert!(new_file.exists());
+                    created = true;
+                    break;
+                }
+            }
+            if created {
+                break;
+            }
+            assert!(Instant::now() < deadline, "file_op pipeline timed out");
             thread::sleep(Duration::from_millis(5));
         }
 

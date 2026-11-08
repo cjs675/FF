@@ -7,7 +7,7 @@
 //! delegated through the worker (reads and debounced writes both).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use egui::{CentralPanel, Key, Panel, PointerButton, RichText, ScrollArea, TextEd
 use ff_core::cfg::{self, Config};
 use ff_core::find::{FileFinder, FsearchFinder, PortableFilter};
 use ff_core::model::{AppOpener, Entry, EntryStats};
-use ff_core::scan::{DirSource, FsEngine, WatcherState};
+use ff_core::scan::{DirSource, FileOpOutcome, FileOpRequest, FsEngine, WatcherState};
 use ff_core::session::{self, SessionState};
 
 use crate::theme::{self, Palette};
@@ -41,6 +41,25 @@ struct OpenWithModal {
     apps: Vec<AppOpener>,
     loading: bool,
     focus_filter: bool,
+}
+
+#[derive(Debug, Clone)]
+enum FileOpModal {
+    Rename {
+        path: PathBuf,
+        input: String,
+        initial_focused: bool,
+    },
+    NewFile {
+        parent: PathBuf,
+        input: String,
+        initial_focused: bool,
+    },
+    NewFolder {
+        parent: PathBuf,
+        input: String,
+        initial_focused: bool,
+    },
 }
 
 pub struct FfShell {
@@ -101,6 +120,10 @@ pub struct FfShell {
     peek_loading: bool,
     /// Active GPU texture handle for image peek previews.
     peek_texture: Option<egui::TextureHandle>,
+    /// Bounded in-memory undo journal (PLAN §4 ops).
+    undo_journal: ff_core::ops::journal::UndoJournal,
+    /// Modal prompt for file operations (rename, new file, new folder).
+    file_op_modal: Option<FileOpModal>,
 }
 
 
@@ -201,6 +224,8 @@ impl FfShell {
             peek_payload: None,
             peek_loading: false,
             peek_texture: None,
+            undo_journal: ff_core::ops::journal::UndoJournal::default(),
+            file_op_modal: None,
         }
     }
 
@@ -641,6 +666,119 @@ impl eframe::App for FfShell {
             }
         }
 
+        // Process file operation outcomes from the background worker (PLAN §4 ops)
+        for outcome in self.scanner.take_file_ops() {
+            match outcome {
+                Ok(FileOpOutcome::Trashed { original_path, trash_path }) => {
+                    let name = original_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| original_path.display().to_string());
+                    self.undo_journal.record(
+                        format!("trash {name}"),
+                        ff_core::ops::journal::UndoAction::RestoreTrash {
+                            original_path,
+                            trash_path,
+                        },
+                    );
+                    self.status_toast = Some((
+                        format!("Moved to Trash: {name} (press 'u' to undo)"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Ok(FileOpOutcome::Renamed { from, to }) => {
+                    let old_name = from
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| from.display().to_string());
+                    let new_name = to
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| to.display().to_string());
+                    self.undo_journal.record(
+                        format!("rename {old_name} -> {new_name}"),
+                        ff_core::ops::journal::UndoAction::Rename {
+                            current: to,
+                            original: from,
+                        },
+                    );
+                    self.anchor = Some(new_name.clone());
+                    self.status_toast = Some((
+                        format!("Renamed: {old_name} -> {new_name} (press 'u' to undo)"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Ok(FileOpOutcome::CreatedFile { path }) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.undo_journal.record(
+                        format!("create {name}"),
+                        ff_core::ops::journal::UndoAction::DeleteCreatedFile { path },
+                    );
+                    self.anchor = Some(name.clone());
+                    self.status_toast = Some((
+                        format!("Created file: {name} (press 'u' to undo)"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Ok(FileOpOutcome::CreatedDir { path }) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.undo_journal.record(
+                        format!("create folder {name}"),
+                        ff_core::ops::journal::UndoAction::DeleteCreatedDir { path },
+                    );
+                    self.anchor = Some(name.clone());
+                    self.status_toast = Some((
+                        format!("Created folder: {name} (press 'u' to undo)"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Ok(FileOpOutcome::RestoredTrash { path }) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.anchor = Some(name.clone());
+                    self.status_toast = Some((
+                        format!("Undone: restored {name}"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Ok(FileOpOutcome::UndoneRename { to, .. }) => {
+                    let name = to
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| to.display().to_string());
+                    self.anchor = Some(name.clone());
+                    self.status_toast = Some((
+                        format!("Undone: renamed back to {name}"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Ok(FileOpOutcome::UndoneDelete { path }) => {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.status_toast = Some((
+                        format!("Undone: removed {name}"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                }
+                Err(err) => {
+                    self.status_toast = Some((
+                        format!("Error: {err}"),
+                        Instant::now() + Duration::from_secs(5),
+                    ));
+                }
+            }
+        }
+
         // 2. First arrival of the restored (or default home) state: switch
         //    to that directory instantly, within this same frame.
         if let Some(state) = self.scanner.take_restored() {
@@ -766,9 +904,67 @@ impl eframe::App for FfShell {
                 self.frequents_selection = self.frequents_selection.saturating_sub(10);
             }
             frequents_selection_moved = self.frequents_selection != previous_frequents_selection;
-        } else if self.open_with_modal.is_none() {
+        } else if self.open_with_modal.is_none() && self.file_op_modal.is_none() {
+            let undo_requested = (!self.filter_focused && ctx.input(|i| !i.modifiers.any()) && pressed(Key::U))
+                || ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && !i.modifiers.shift && i.key_pressed(Key::Z));
+            let trash_requested = ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Backspace))
+                || (!self.filter_focused && (pressed(Key::Delete) || (ctx.input(|i| !i.modifiers.any()) && pressed(Key::X))));
+            let rename_requested = (!self.filter_focused && ctx.input(|i| !i.modifiers.any()) && pressed(Key::R)) || pressed(Key::F2);
+            let new_folder_requested = (!self.filter_focused && ctx.input(|i| i.modifiers.shift && !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt) && pressed(Key::A))
+                || ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && i.modifiers.shift && i.key_pressed(Key::N));
+            let new_file_requested = (!self.filter_focused && ctx.input(|i| !i.modifiers.any()) && pressed(Key::A))
+                || ctx.input(|i| (i.modifiers.command || i.modifiers.ctrl) && !i.modifiers.shift && i.key_pressed(Key::N));
+
             if open_with_requested {
                 self.open_with_selected();
+            } else if undo_requested {
+                self.vim_count = None;
+                self.vim_pending_g = false;
+                if let Some(entry) = self.undo_journal.pop() {
+                    self.status_toast = Some((
+                        format!("Undoing: {}...", entry.description),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.scanner.request_file_op(FileOpRequest::Undo(entry.action));
+                } else {
+                    self.status_toast = Some((
+                        "Nothing to undo".to_string(),
+                        Instant::now() + Duration::from_secs(2),
+                    ));
+                }
+            } else if trash_requested {
+                self.vim_count = None;
+                self.vim_pending_g = false;
+                if let Some(entry) = self.display.get(self.selection) {
+                    let path = entry.path.clone();
+                    self.scanner.request_file_op(FileOpRequest::Trash { path });
+                }
+            } else if rename_requested {
+                self.vim_count = None;
+                self.vim_pending_g = false;
+                if let Some(entry) = self.display.get(self.selection) {
+                    self.file_op_modal = Some(FileOpModal::Rename {
+                        path: entry.path.clone(),
+                        input: entry.name.clone(),
+                        initial_focused: false,
+                    });
+                }
+            } else if new_folder_requested {
+                self.vim_count = None;
+                self.vim_pending_g = false;
+                self.file_op_modal = Some(FileOpModal::NewFolder {
+                    parent: self.cwd.clone(),
+                    input: String::new(),
+                    initial_focused: false,
+                });
+            } else if new_file_requested {
+                self.vim_count = None;
+                self.vim_pending_g = false;
+                self.file_op_modal = Some(FileOpModal::NewFile {
+                    parent: self.cwd.clone(),
+                    input: String::new(),
+                    initial_focused: false,
+                });
             } else if !self.filter_focused {
                 let no_modifiers = !ctx.input(|i| i.modifiers.any());
                 let shift_only = ctx.input(|i| {
@@ -1554,6 +1750,132 @@ impl eframe::App for FfShell {
             }
         }
 
+        // --- modal palette: File operations (Rename, New File, New Folder)
+        if let Some(mut modal) = self.file_op_modal.take() {
+            let mut close = false;
+            let mut submit = false;
+
+            let esc_pressed = ctx.input(|i| i.key_pressed(Key::Escape));
+            let enter_pressed = ctx.input(|i| i.key_pressed(Key::Enter));
+            if esc_pressed {
+                close = true;
+            } else if enter_pressed {
+                submit = true;
+            }
+
+            let border_color = self.palette.border;
+            let (title, placeholder) = match &modal {
+                FileOpModal::Rename { .. } => ("Rename", "New name"),
+                FileOpModal::NewFile { .. } => ("New File", "Filename"),
+                FileOpModal::NewFolder { .. } => ("New Folder", "Folder name"),
+            };
+
+            egui::Window::new("file_op_modal")
+                .title_bar(false)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .fixed_size(egui::vec2(360.0, 130.0))
+                .frame(
+                    egui::Frame::NONE
+                        .fill(self.palette.surface)
+                        .stroke(egui::Stroke::new(1.0, border_color))
+                        .corner_radius(6)
+                        .inner_margin(egui::Margin::symmetric(16, 14)),
+                )
+                .show(&ctx, |ui| {
+                    self.pointer_over_interactive = true;
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 10.0);
+
+                    ui.label(
+                        RichText::new(title)
+                            .color(self.palette.fg)
+                            .size(14.0)
+                            .strong(),
+                    );
+
+                    let (input_ref, initial_focused) = match &mut modal {
+                        FileOpModal::Rename { input, initial_focused, .. } => (input, initial_focused),
+                        FileOpModal::NewFile { input, initial_focused, .. } => (input, initial_focused),
+                        FileOpModal::NewFolder { input, initial_focused, .. } => (input, initial_focused),
+                    };
+
+                    let edit = egui::TextEdit::singleline(input_ref)
+                        .hint_text(placeholder)
+                        .font(egui::FontId::proportional(13.0))
+                        .text_color(self.palette.fg)
+                        .margin(egui::Margin::symmetric(8, 6));
+
+                    let resp = ui.add(edit);
+                    if !*initial_focused {
+                        resp.request_focus();
+                        *initial_focused = true;
+                    }
+
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let confirm_btn = egui::Button::new(
+                                RichText::new("Confirm")
+                                    .color(self.palette.bg)
+                                    .size(12.0)
+                                    .strong(),
+                            )
+                            .fill(self.palette.accent)
+                            .corner_radius(5);
+                            if ui.add(confirm_btn).clicked() {
+                                submit = true;
+                            }
+
+                            let cancel_btn = egui::Button::new(
+                                RichText::new("Cancel")
+                                    .color(self.palette.muted)
+                                    .size(12.0),
+                            )
+                            .fill(egui::Color32::TRANSPARENT)
+                            .corner_radius(5);
+                            if ui.add(cancel_btn).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+
+            if submit {
+                let trimmed = match &modal {
+                    FileOpModal::Rename { input, .. } => input.trim().to_string(),
+                    FileOpModal::NewFile { input, .. } => input.trim().to_string(),
+                    FileOpModal::NewFolder { input, .. } => input.trim().to_string(),
+                };
+                if !trimmed.is_empty() {
+                    match modal {
+                        FileOpModal::Rename { path, .. } => {
+                            let new_path = path.parent().unwrap_or(Path::new("")).join(&trimmed);
+                            if new_path != path {
+                                self.scanner.request_file_op(FileOpRequest::Rename {
+                                    from: path,
+                                    to: new_path,
+                                });
+                            }
+                        }
+                        FileOpModal::NewFile { parent, .. } => {
+                            let target = parent.join(&trimmed);
+                            self.scanner.request_file_op(FileOpRequest::CreateFile {
+                                path: target,
+                            });
+                        }
+                        FileOpModal::NewFolder { parent, .. } => {
+                            let target = parent.join(&trimmed);
+                            self.scanner.request_file_op(FileOpRequest::CreateDir {
+                                path: target,
+                            });
+                        }
+                    }
+                }
+            } else if !close {
+                self.file_op_modal = Some(modal);
+            }
+        }
+
         // --- frameless drag: press on any non-interactive space (PLAN §2)
         let press = ctx.input(|i| i.pointer.primary_pressed());
         if press && !self.pointer_over_interactive && !ctx.egui_is_using_pointer() {
@@ -1627,6 +1949,8 @@ mod tests {
             peek_payload: None,
             peek_loading: false,
             peek_texture: None,
+            undo_journal: ff_core::ops::journal::UndoJournal::default(),
+            file_op_modal: None,
         };
 
         let state = SessionState {
@@ -1688,6 +2012,8 @@ mod tests {
             peek_payload: None,
             peek_loading: false,
             peek_texture: None,
+            undo_journal: ff_core::ops::journal::UndoJournal::default(),
+            file_op_modal: None,
         };
 
         // Navigate to dir_b
@@ -1777,6 +2103,8 @@ mod tests {
             peek_payload: None,
             peek_loading: false,
             peek_texture: None,
+            undo_journal: ff_core::ops::journal::UndoJournal::default(),
+            file_op_modal: None,
         };
 
         // 1. Initial selection at 0
@@ -1820,6 +2148,75 @@ mod tests {
             None => 0,
         };
         assert_eq!(shell.selection, 9);
+    }
+
+    #[test]
+    fn test_file_op_modal_and_undo_journal() {
+        let mut shell = FfShell {
+            config: Config::default(),
+            config_warnings: Vec::new(),
+            palette: crate::theme::palette_for("gruvbox-dark", None),
+            scanner: FsEngine::launch(false),
+            finder: Box::new(ff_core::find::PortableFilter),
+            cwd: PathBuf::from("/test"),
+            entries: Vec::new(),
+            display: Vec::new(),
+            anchor: None,
+            filter: String::new(),
+            selection: 0,
+            listing_loading: false,
+            filter_focus_request: false,
+            filter_focused: false,
+            pointer_over_interactive: false,
+            session_path: None,
+            last_saved: None,
+            pending_scroll: false,
+            stat_cache: HashMap::new(),
+            open_with_modal: None,
+            status_toast: None,
+            frequents: Vec::new(),
+            frequents_open: false,
+            frequents_selection: 0,
+            frequents_filter: String::new(),
+            frequents_focus_filter: false,
+            last_visited_cwd: None,
+            history_back: Vec::new(),
+            history_forward: Vec::new(),
+            vim_count: None,
+            vim_pending_g: false,
+            preview_open: false,
+            peek_path: None,
+            peek_payload: None,
+            peek_loading: false,
+            peek_texture: None,
+            undo_journal: ff_core::ops::journal::UndoJournal::default(),
+            file_op_modal: None,
+        };
+
+        // 1. Initial journal is empty
+        assert!(shell.undo_journal.is_empty());
+
+        // 2. Open rename modal
+        shell.file_op_modal = Some(FileOpModal::Rename {
+            path: PathBuf::from("/test/old.txt"),
+            input: "old.txt".into(),
+            initial_focused: false,
+        });
+        assert!(shell.file_op_modal.is_some());
+
+        // 3. Record undo action
+        shell.undo_journal.record(
+            "rename old.txt -> new.txt",
+            ff_core::ops::journal::UndoAction::Rename {
+                current: PathBuf::from("/test/new.txt"),
+                original: PathBuf::from("/test/old.txt"),
+            },
+        );
+        assert_eq!(shell.undo_journal.len(), 1);
+
+        let undone = shell.undo_journal.pop().unwrap();
+        assert_eq!(undone.description, "rename old.txt -> new.txt");
+        assert!(shell.undo_journal.is_empty());
     }
 }
 
