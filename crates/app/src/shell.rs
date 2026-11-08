@@ -401,8 +401,6 @@ impl FfShell {
                             resp.scroll_to_me(None);
                         }
                         ui.painter().rect_filled(rect, 0.0, self.palette.sel);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(rect, 0.0, self.palette.hover);
                     }
 
                     // 1px hairline divider on row bottom
@@ -1102,8 +1100,6 @@ impl eframe::App for FfShell {
                                 resp.scroll_to_me(None);
                             }
                             ui.painter().rect_filled(rect, 0.0, self.palette.sel);
-                        } else if resp.hovered() {
-                            ui.painter().rect_filled(rect, 0.0, self.palette.hover);
                         }
 
                         let name_color = if entry.is_dir() {
@@ -1315,8 +1311,6 @@ impl eframe::App for FfShell {
                                     if is_selected {
                                         resp.scroll_to_me(None);
                                         ui.painter().rect_filled(rect, 4.0, self.palette.sel);
-                                    } else if resp.hovered() {
-                                        ui.painter().rect_filled(rect, 4.0, self.palette.hover);
                                     }
 
                                     ui.painter().text(
