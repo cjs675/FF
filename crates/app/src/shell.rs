@@ -574,6 +574,15 @@ impl FfShell {
             .unwrap_or(0);
     }
 
+    fn open_file_smart(&mut self, path: &std::path::Path) {
+        if let Err(e) = ff_core::ops::open::open_smart(path, &self.config.openers) {
+            self.status_toast = Some((
+                format!("cannot open: {e}"),
+                Instant::now() + Duration::from_secs(4),
+            ));
+        }
+    }
+
     fn enter_selected(&mut self) {
         if let Some(entry) = self.display.get(self.selection) {
             if entry.is_dir() {
@@ -586,12 +595,7 @@ impl FfShell {
                 self.peek_texture = None;
             } else {
                 let path = entry.path.clone();
-                if let Err(e) = ff_core::ops::open::open_default(&path) {
-                    self.status_toast = Some((
-                        format!("cannot open: {e}"),
-                        Instant::now() + Duration::from_secs(4),
-                    ));
-                }
+                self.open_file_smart(&path);
             }
         }
     }
@@ -1176,6 +1180,34 @@ impl eframe::App for FfShell {
                     self.vim_count = None;
                     self.vim_pending_g = false;
                     self.enter_selected();
+                } else if no_modifiers && pressed(Key::E) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
+                    if let Some(entry) = self.display.get(self.selection)
+                        && !entry.is_dir()
+                    {
+                        let path = entry.path.clone();
+                        if let Err(e) = ff_core::ops::open::open_in_terminal_editor("nvim", &path) {
+                            self.status_toast = Some((
+                                format!("cannot open editor: {e}"),
+                                Instant::now() + Duration::from_secs(4),
+                            ));
+                        }
+                    }
+                } else if no_modifiers && pressed(Key::O) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
+                    if let Some(entry) = self.display.get(self.selection)
+                        && !entry.is_dir()
+                    {
+                        let path = entry.path.clone();
+                        if let Err(e) = ff_core::ops::open::open_default(&path) {
+                            self.status_toast = Some((
+                                format!("cannot open: {e}"),
+                                Instant::now() + Duration::from_secs(4),
+                            ));
+                        }
+                    }
                 } else if pressed(Key::Backspace) {
                     self.vim_count = None;
                     self.vim_pending_g = false;
@@ -1615,7 +1647,15 @@ impl eframe::App for FfShell {
             }
             if let Some(i) = double_clicked {
                 self.selection = i;
-                self.enter_selected();
+                if let Some(entry) = self.display.get(i) {
+                    if entry.is_dir() {
+                        let name = entry.name.clone();
+                        self.descend(&name);
+                    } else {
+                        let path = entry.path.clone();
+                        self.open_file_smart(&path);
+                    }
+                }
             }
         });
 
@@ -1983,11 +2023,8 @@ impl eframe::App for FfShell {
                 LauncherOutcome::OpenPath(path) => {
                     if path.is_dir() {
                         self.navigate_to(path);
-                    } else if let Err(e) = ff_core::ops::open::open_default(&path) {
-                        self.status_toast = Some((
-                            format!("cannot open: {e}"),
-                            Instant::now() + Duration::from_secs(4),
-                        ));
+                    } else {
+                        self.open_file_smart(&path);
                     }
                 }
                 LauncherOutcome::ExecuteAction(id) => match id {
@@ -2010,6 +2047,32 @@ impl eframe::App for FfShell {
                     }
                     "open_with" => {
                         self.open_with_selected();
+                    }
+                    "open_editor" => {
+                        if let Some(entry) = self.display.get(self.selection)
+                            && !entry.is_dir()
+                        {
+                            let path = entry.path.clone();
+                            if let Err(e) = ff_core::ops::open::open_in_terminal_editor("nvim", &path) {
+                                self.status_toast = Some((
+                                    format!("cannot open editor: {e}"),
+                                    Instant::now() + Duration::from_secs(4),
+                                ));
+                            }
+                        }
+                    }
+                    "open_system" => {
+                        if let Some(entry) = self.display.get(self.selection)
+                            && !entry.is_dir()
+                        {
+                            let path = entry.path.clone();
+                            if let Err(e) = ff_core::ops::open::open_default(&path) {
+                                self.status_toast = Some((
+                                    format!("cannot open: {e}"),
+                                    Instant::now() + Duration::from_secs(4),
+                                ));
+                            }
+                        }
                     }
                     "trash" => {
                         if let Some(entry) = self.display.get(self.selection) {

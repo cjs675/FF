@@ -27,6 +27,7 @@ pub struct Config {
     pub launch: Launch,
     pub show_hidden: bool,
     pub keybinds: Vec<(String, String)>,
+    pub openers: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -40,6 +41,7 @@ impl Default for Config {
             launch: Launch::Session,
             show_hidden: false,
             keybinds: Vec::new(),
+            openers: Vec::new(),
         }
     }
 }
@@ -134,6 +136,22 @@ pub fn parse(src: &str) -> (Config, Vec<String>) {
                     "line {line_no}: `keybind` value must be `combo=action`, got `{value}`"
                 )),
             },
+            "open" => match value.split_once('=') {
+                Some((ext, app)) => cfg
+                    .openers
+                    .push((ext.trim().to_lowercase(), app.trim().to_string())),
+                None => warnings.push(format!(
+                    "line {line_no}: `open` value must be `ext=app`, got `{value}`"
+                )),
+            },
+            key if key.starts_with("open.") => {
+                let ext = key.trim_start_matches("open.").trim().to_lowercase();
+                if ext.is_empty() {
+                    warnings.push(format!("line {line_no}: expected `open.<ext> = <app>`"));
+                } else {
+                    cfg.openers.push((ext, value.to_string()));
+                }
+            }
             other => warnings.push(format!("line {line_no}: unknown key `{other}`")),
         }
     }
@@ -193,6 +211,24 @@ mod tests {
         let (cfg, warnings) = parse("show_hidden = maybe\n");
         assert!(!cfg.show_hidden);
         assert!(warnings.iter().any(|w| w.contains("`show_hidden`")));
+    }
+
+    #[test]
+    fn parses_openers_both_syntaxes() {
+        let (cfg, warnings) = parse(
+            "open.java = IntelliJ IDEA\n\
+             open.cpp = CLion\n\
+             open.pdf = Preview   # built-in viewer\n\
+             open = sh=nvim\n\
+             open = docx=Preview\n",
+        );
+        assert_eq!(cfg.openers.len(), 5);
+        assert_eq!(cfg.openers[0], ("java".into(), "IntelliJ IDEA".into()));
+        assert_eq!(cfg.openers[1], ("cpp".into(), "CLion".into()));
+        assert_eq!(cfg.openers[2], ("pdf".into(), "Preview".into()));
+        assert_eq!(cfg.openers[3], ("sh".into(), "nvim".into()));
+        assert_eq!(cfg.openers[4], ("docx".into(), "Preview".into()));
+        assert!(warnings.is_empty());
     }
 
     #[test]

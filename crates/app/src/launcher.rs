@@ -59,6 +59,18 @@ impl LauncherAction {
                 shortcut: "⌥↵",
             },
             LauncherAction {
+                id: "open_editor",
+                title: "Open in Editor (nvim)",
+                category: "File Operations",
+                shortcut: "e",
+            },
+            LauncherAction {
+                id: "open_system",
+                title: "Open with OS Default App",
+                category: "File Operations",
+                shortcut: "o",
+            },
+            LauncherAction {
                 id: "trash",
                 title: "Move Selected to Trash",
                 category: "File Operations",
