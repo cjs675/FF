@@ -20,6 +20,7 @@ pub enum LauncherMode {
     Files,
     Content,
     Actions,
+    Themes,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +34,12 @@ pub struct LauncherAction {
 impl LauncherAction {
     pub fn all() -> Vec<LauncherAction> {
         vec![
+            LauncherAction {
+                id: "theme_picker",
+                title: "Change Theme...",
+                category: "Appearance",
+                shortcut: "⌘⇧P",
+            },
             LauncherAction {
                 id: "new_file",
                 title: "New File...",
@@ -121,6 +128,8 @@ pub struct LauncherState {
     pub peek_payload: Option<ff_core::ops::peek::PeekPayload>,
     pub peek_loading: bool,
     pub peek_texture: Option<egui::TextureHandle>,
+    // Theme picker rollback on cancel
+    pub initial_theme: Option<String>,
 }
 
 impl Default for LauncherState {
@@ -141,6 +150,7 @@ impl Default for LauncherState {
             peek_payload: None,
             peek_loading: false,
             peek_texture: None,
+            initial_theme: None,
         }
     }
 }
@@ -149,6 +159,7 @@ pub enum LauncherOutcome {
     None,
     OpenPath(PathBuf),
     ExecuteAction(&'static str),
+    ApplyTheme(&'static str),
     Close,
 }
 
@@ -165,6 +176,26 @@ impl LauncherState {
             self.peek_path = None;
             self.peek_payload = None;
             self.peek_texture = None;
+            self.initial_theme = None;
+        }
+    }
+
+    pub fn open_mode(&mut self, mode: LauncherMode, current_theme: Option<&str>) {
+        self.open = true;
+        self.mode = mode;
+        self.query.clear();
+        self.prev_query.clear();
+        self.focus_input = true;
+        self.initial_theme = current_theme.map(str::to_string);
+        if mode == LauncherMode::Themes {
+            let all = crate::theme::all_themes();
+            if let Some(cur) = current_theme {
+                self.selection = all.iter().position(|t| t.id == cur).unwrap_or(0);
+            } else {
+                self.selection = 0;
+            }
+        } else {
+            self.selection = 0;
         }
     }
 
@@ -172,7 +203,8 @@ impl LauncherState {
         self.mode = match self.mode {
             LauncherMode::Files => LauncherMode::Content,
             LauncherMode::Content => LauncherMode::Actions,
-            LauncherMode::Actions => LauncherMode::Files,
+            LauncherMode::Actions => LauncherMode::Themes,
+            LauncherMode::Themes => LauncherMode::Files,
         };
         self.selection = 0;
         self.focus_input = true;
@@ -188,6 +220,7 @@ impl LauncherState {
         theme_name: &str,
         mut on_request_content: impl FnMut(&Path, &str) -> u64,
         mut on_request_peek: impl FnMut(&Path),
+        mut on_preview_theme: impl FnMut(&'static str),
     ) -> LauncherOutcome {
         if !self.open {
             return LauncherOutcome::None;
@@ -236,6 +269,13 @@ impl LauncherState {
         } else if self.query.starts_with('>') {
             self.mode = LauncherMode::Actions;
             self.query = self.query.trim_start_matches('>').trim_start().to_string();
+            self.selection = 0;
+        } else if self.query.starts_with("theme:") {
+            if self.initial_theme.is_none() {
+                self.initial_theme = Some(theme_name.to_string());
+            }
+            self.mode = LauncherMode::Themes;
+            self.query = self.query.trim_start_matches("theme:").trim_start().to_string();
             self.selection = 0;
         }
 
@@ -286,6 +326,23 @@ impl LauncherState {
             Vec::new()
         };
 
+        // 3. Themes filtering
+        let all_themes = crate::theme::all_themes();
+        let filtered_themes: Vec<&crate::theme::ThemeItem> = if self.mode == LauncherMode::Themes {
+            all_themes
+                .iter()
+                .filter(|t| {
+                    query_lower.is_empty()
+                        || t.name.to_lowercase().contains(&query_lower)
+                        || t.id.to_lowercase().contains(&query_lower)
+                        || (t.is_dark && "dark".contains(&query_lower))
+                        || (!t.is_dark && "light".contains(&query_lower))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Determine total item count for selection bounds
         let total_items = match self.mode {
             LauncherMode::Files => matching_files.len(),
@@ -293,6 +350,7 @@ impl LauncherState {
                 self.content_results.as_ref().map(|r| r.matches.len()).unwrap_or(0)
             }
             LauncherMode::Actions => filtered_actions.len(),
+            LauncherMode::Themes => filtered_themes.len(),
         };
 
         if select_up && self.selection > 0 {
@@ -307,6 +365,13 @@ impl LauncherState {
             self.selection = 0;
         }
 
+        // Live preview theme while navigating
+        if self.mode == LauncherMode::Themes
+            && let Some(t) = filtered_themes.get(self.selection)
+        {
+            on_preview_theme(t.id);
+        }
+
         // Determine currently active selected path for live peek preview
         let current_target_path: Option<PathBuf> = match self.mode {
             LauncherMode::Files => matching_files.get(self.selection).map(|e| e.path.clone()),
@@ -314,7 +379,7 @@ impl LauncherState {
                 .content_results
                 .as_ref()
                 .and_then(|r| r.matches.get(self.selection).map(|m| m.path.clone())),
-            LauncherMode::Actions => None,
+            LauncherMode::Actions | LauncherMode::Themes => None,
         };
 
         if let Some(target_path) = &current_target_path {
@@ -355,6 +420,13 @@ impl LauncherState {
                     if let Some(action) = filtered_actions.get(self.selection) {
                         outcome = LauncherOutcome::ExecuteAction(action.id);
                         self.open = false;
+                    }
+                }
+                LauncherMode::Themes => {
+                    if let Some(t) = filtered_themes.get(self.selection) {
+                        outcome = LauncherOutcome::ApplyTheme(t.id);
+                        self.open = false;
+                        self.initial_theme = None;
                     }
                 }
             }
@@ -415,6 +487,7 @@ impl LauncherState {
                             (LauncherMode::Files, "Files"),
                             (LauncherMode::Content, "Content"),
                             (LauncherMode::Actions, "Actions"),
+                            (LauncherMode::Themes, "Themes"),
                         ];
 
                         for (m, label) in modes {
@@ -446,6 +519,9 @@ impl LauncherState {
                             });
 
                             if ui.add(btn).clicked() {
+                                if m == LauncherMode::Themes && self.initial_theme.is_none() {
+                                    self.initial_theme = Some(theme_name.to_string());
+                                }
                                 self.mode = m;
                                 self.selection = 0;
                                 self.focus_input = true;
@@ -460,6 +536,7 @@ impl LauncherState {
                             LauncherMode::Files => "Search files and folders...",
                             LauncherMode::Content => "Grep text inside files...",
                             LauncherMode::Actions => "Search commands and actions...",
+                            LauncherMode::Themes => "Filter themes (dark, light, name)...",
                         };
 
                         let edit = TextEdit::singleline(&mut self.query)
@@ -742,6 +819,102 @@ impl LauncherState {
                                                 }
                                             }
                                         }
+                                        LauncherMode::Themes => {
+                                            if filtered_themes.is_empty() {
+                                                ui.add_space(40.0);
+                                                ui.vertical_centered(|ui| {
+                                                    ui.label(
+                                                        RichText::new("No matching themes")
+                                                            .color(palette.muted)
+                                                            .size(11.5)
+                                                            .monospace(),
+                                                    );
+                                                });
+                                            } else {
+                                                for (i, theme_item) in filtered_themes.iter().enumerate() {
+                                                    let is_selected = i == self.selection;
+                                                    let row_h = 24.0;
+                                                    let (rect, resp) = ui.allocate_exact_size(
+                                                        egui::vec2(ui.available_width(), row_h),
+                                                        egui::Sense::click(),
+                                                    );
+
+                                                    if is_selected {
+                                                        if select_up || select_down {
+                                                            resp.scroll_to_me(Some(egui::Align::Center));
+                                                        }
+                                                        ui.painter().rect_filled(rect, 4.0, palette.sel);
+                                                    }
+
+                                                    let row_painter = ui.painter().with_clip_rect(rect);
+
+                                                    // Swatch circles: bg, surface, accent
+                                                    let dot_radius = 4.0;
+                                                    let dot_y = rect.center().y;
+
+                                                    // Swatch 1: BG
+                                                    let dot1_pos = egui::pos2(rect.min.x + 12.0, dot_y);
+                                                    row_painter.circle_filled(dot1_pos, dot_radius, theme_item.palette.bg);
+                                                    row_painter.circle_stroke(
+                                                        dot1_pos,
+                                                        dot_radius,
+                                                        egui::Stroke::new(1.0, theme_item.palette.border),
+                                                    );
+
+                                                    // Swatch 2: Surface
+                                                    let dot2_pos = egui::pos2(rect.min.x + 23.0, dot_y);
+                                                    row_painter.circle_filled(dot2_pos, dot_radius, theme_item.palette.surface);
+                                                    row_painter.circle_stroke(
+                                                        dot2_pos,
+                                                        dot_radius,
+                                                        egui::Stroke::new(1.0, theme_item.palette.border),
+                                                    );
+
+                                                    // Swatch 3: Accent
+                                                    let dot3_pos = egui::pos2(rect.min.x + 34.0, dot_y);
+                                                    row_painter.circle_filled(dot3_pos, dot_radius, theme_item.palette.accent);
+
+                                                    // Theme Name
+                                                    let is_current = theme_item.id == theme_name;
+                                                    let name_color = if is_current {
+                                                        palette.accent
+                                                    } else {
+                                                        palette.fg
+                                                    };
+
+                                                    let name_text = if is_current {
+                                                        format!("{} ✓", theme_item.name)
+                                                    } else {
+                                                        theme_item.name.to_string()
+                                                    };
+
+                                                    row_painter.text(
+                                                        egui::pos2(rect.min.x + 44.0, rect.center().y),
+                                                        egui::Align2::LEFT_CENTER,
+                                                        &name_text,
+                                                        egui::FontId::monospace(11.5),
+                                                        name_color,
+                                                    );
+
+                                                    // Dark/Light tag
+                                                    let tag = if theme_item.is_dark { "dark" } else { "light" };
+                                                    row_painter.text(
+                                                        egui::pos2(rect.max.x - 8.0, rect.center().y),
+                                                        egui::Align2::RIGHT_CENTER,
+                                                        tag,
+                                                        egui::FontId::monospace(9.5),
+                                                        palette.label,
+                                                    );
+
+                                                    if resp.clicked() {
+                                                        self.selection = i;
+                                                        outcome = LauncherOutcome::ApplyTheme(theme_item.id);
+                                                        self.open = false;
+                                                        self.initial_theme = None;
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 });
                         });
@@ -771,7 +944,158 @@ impl LauncherState {
                                         bottom: 6,
                                     })
                                     .show(ui, |ui| {
-                                        if let Some(path) = &self.peek_path {
+                                        if self.mode == LauncherMode::Themes {
+                                            if let Some(theme_item) = filtered_themes.get(self.selection) {
+                                                let p = &theme_item.palette;
+                                                ui.vertical_centered(|ui| {
+                                                    ui.add_space(4.0);
+                                                    ui.label(
+                                                        RichText::new(theme_item.name)
+                                                            .monospace()
+                                                            .strong()
+                                                            .size(13.0)
+                                                            .color(p.accent),
+                                                    );
+                                                    ui.add_space(2.0);
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{}  ·  {}",
+                                                            if theme_item.is_dark { "Dark" } else { "Light" },
+                                                            theme_item.id
+                                                        ))
+                                                        .monospace()
+                                                        .size(10.5)
+                                                        .color(p.muted),
+                                                    );
+                                                    ui.add_space(4.0);
+                                                });
+
+                                                // 1px hairline divider across the preview pane
+                                                let (hairline_rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(ui.available_width(), 1.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(hairline_rect, 0.0, p.border);
+                                                ui.add_space(8.0);
+
+                                                // Description
+                                                ui.label(
+                                                    RichText::new(theme_item.description)
+                                                        .monospace()
+                                                        .size(11.0)
+                                                        .color(p.fg),
+                                                );
+                                                ui.add_space(10.0);
+
+                                                // Swatch color bar (BG, SURF, ACCENT, MUTED)
+                                                ui.horizontal(|ui| {
+                                                    let swatches = [
+                                                        ("BG", p.bg, p.border),
+                                                        ("SURF", p.surface, p.border),
+                                                        ("ACCENT", p.accent, egui::Color32::TRANSPARENT),
+                                                        ("MUTED", p.muted, egui::Color32::TRANSPARENT),
+                                                    ];
+                                                    let chip_w = ((ui.available_width() - 12.0) / 4.0).max(10.0);
+                                                    for (lbl, color, border) in swatches {
+                                                        let (rect, _) = ui.allocate_exact_size(
+                                                            egui::vec2(chip_w, 24.0),
+                                                            egui::Sense::hover(),
+                                                        );
+                                                        ui.painter().rect_filled(rect, 4.0, color);
+                                                        if border != egui::Color32::TRANSPARENT {
+                                                            ui.painter().rect_stroke(
+                                                                rect,
+                                                                4.0,
+                                                                egui::Stroke::new(1.0, border),
+                                                                egui::StrokeKind::Outside,
+                                                            );
+                                                        }
+                                                        let lum = color.r() as u32 + color.g() as u32 + color.b() as u32;
+                                                        let text_color = if lum > 400 {
+                                                            egui::Color32::from_rgb(0x1a, 0x1a, 0x1e)
+                                                        } else {
+                                                            egui::Color32::from_rgb(0xf5, 0xf5, 0xf5)
+                                                        };
+                                                        ui.painter().text(
+                                                            rect.center(),
+                                                            egui::Align2::CENTER_CENTER,
+                                                            lbl,
+                                                            egui::FontId::monospace(9.0),
+                                                            text_color,
+                                                        );
+                                                        ui.add_space(3.0);
+                                                    }
+                                                });
+
+                                                ui.add_space(10.0);
+
+                                                // Live UI Preview Box
+                                                ui.label(
+                                                    RichText::new("Live UI Preview")
+                                                        .monospace()
+                                                        .size(10.0)
+                                                        .color(p.label),
+                                                );
+                                                ui.add_space(4.0);
+
+                                                let (box_rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(ui.available_width(), 76.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                let bp = ui.painter().with_clip_rect(box_rect);
+                                                bp.rect_filled(box_rect, 4.0, p.bg);
+                                                bp.rect_stroke(
+                                                    box_rect,
+                                                    4.0,
+                                                    egui::Stroke::new(1.0, p.border),
+                                                    egui::StrokeKind::Outside,
+                                                );
+
+                                                // 1. Directory row
+                                                bp.text(
+                                                    egui::pos2(box_rect.min.x + 8.0, box_rect.min.y + 12.0),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    "src/",
+                                                    egui::FontId::monospace(10.5),
+                                                    p.accent,
+                                                );
+                                                // 2. Selected file row
+                                                let sel_rect = egui::Rect::from_min_size(
+                                                    egui::pos2(box_rect.min.x + 2.0, box_rect.min.y + 24.0),
+                                                    egui::vec2(box_rect.width() - 4.0, 18.0),
+                                                );
+                                                bp.rect_filled(sel_rect, 2.0, p.sel);
+                                                bp.text(
+                                                    egui::pos2(box_rect.min.x + 8.0, box_rect.min.y + 33.0),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    "main.rs",
+                                                    egui::FontId::monospace(10.5),
+                                                    p.fg,
+                                                );
+                                                bp.text(
+                                                    egui::pos2(box_rect.max.x - 8.0, box_rect.min.y + 33.0),
+                                                    egui::Align2::RIGHT_CENTER,
+                                                    "1.2 KB",
+                                                    egui::FontId::monospace(9.0),
+                                                    p.muted,
+                                                );
+                                                // 3. Status footer
+                                                bp.line_segment(
+                                                    [
+                                                        egui::pos2(box_rect.min.x, box_rect.min.y + 48.0),
+                                                        egui::pos2(box_rect.max.x, box_rect.min.y + 48.0),
+                                                    ],
+                                                    egui::Stroke::new(1.0, p.border),
+                                                );
+                                                bp.text(
+                                                    egui::pos2(box_rect.min.x + 8.0, box_rect.min.y + 60.0),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    "✓ git:(main) · 14 items",
+                                                    egui::FontId::monospace(9.0),
+                                                    p.green,
+                                                );
+                                            }
+                                        } else if let Some(path) = &self.peek_path {
                                             let peek_view = PeekView {
                                                 path,
                                                 payload: self.peek_payload.as_ref(),
@@ -853,6 +1177,14 @@ impl LauncherState {
                                             .monospace(),
                                     );
                                 }
+                                LauncherMode::Themes => {
+                                    ui.label(
+                                        RichText::new(format!("{} themes", filtered_themes.len()))
+                                            .color(palette.label)
+                                            .size(10.5)
+                                            .monospace(),
+                                    );
+                                }
                             }
                         });
                     });
@@ -894,6 +1226,9 @@ mod tests {
         assert_eq!(launcher.mode, LauncherMode::Actions);
 
         launcher.cycle_mode();
+        assert_eq!(launcher.mode, LauncherMode::Themes);
+
+        launcher.cycle_mode();
         assert_eq!(launcher.mode, LauncherMode::Files);
 
         launcher.toggle();
@@ -904,6 +1239,7 @@ mod tests {
     fn test_launcher_actions_list() {
         let actions = LauncherAction::all();
         assert!(!actions.is_empty());
+        assert!(actions.iter().any(|a| a.id == "theme_picker"));
         assert!(actions.iter().any(|a| a.id == "new_file"));
         assert!(actions.iter().any(|a| a.id == "undo"));
         assert!(actions.iter().any(|a| a.id == "copy_path"));
@@ -930,5 +1266,26 @@ mod tests {
         }
         assert_eq!(launcher.mode, LauncherMode::Actions);
         assert_eq!(launcher.query, "new");
+
+        launcher.query = "theme:nord".to_string();
+        if launcher.query.starts_with("theme:") {
+            launcher.mode = LauncherMode::Themes;
+            launcher.query = launcher.query.trim_start_matches("theme:").trim_start().to_string();
+        }
+        assert_eq!(launcher.mode, LauncherMode::Themes);
+        assert_eq!(launcher.query, "nord");
+    }
+
+    #[test]
+    fn test_launcher_theme_picker_open_mode() {
+        let mut launcher = LauncherState::default();
+        launcher.open_mode(LauncherMode::Themes, Some("catppuccin-mocha"));
+        assert!(launcher.open);
+        assert_eq!(launcher.mode, LauncherMode::Themes);
+        assert_eq!(launcher.initial_theme.as_deref(), Some("catppuccin-mocha"));
+
+        let all = crate::theme::all_themes();
+        let expected_idx = all.iter().position(|t| t.id == "catppuccin-mocha").unwrap();
+        assert_eq!(launcher.selection, expected_idx);
     }
 }

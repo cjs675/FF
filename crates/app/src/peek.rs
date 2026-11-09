@@ -298,11 +298,12 @@ impl<'a> PeekView<'a> {
                                 .or_else(|| ss.find_syntax_by_first_line(content))
                                 .unwrap_or_else(|| ss.find_syntax_plain_text());
 
-                            let is_dark = self.theme_name == "gruvbox-dark";
-                            let theme_key = if is_dark {
-                                "base16-eighties.dark"
-                            } else {
-                                "InspiredGitHub"
+                            let theme_key = match self.theme_name {
+                                "solarized-dark" => "Solarized (dark)",
+                                "solarized-light" => "Solarized (light)",
+                                "catppuccin-mocha" => "base16-mocha.dark",
+                                _ if self.palette.is_dark => "base16-eighties.dark",
+                                _ => "InspiredGitHub",
                             };
                             let theme = &ts.themes[theme_key];
 

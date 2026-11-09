@@ -1115,6 +1115,7 @@ mod tests {
                 cwd: listed.clone(),
                 selection: Some("b.txt".into()),
                 frequents: Vec::new(),
+                theme: None,
             },
         )
         .unwrap();
@@ -1135,6 +1136,7 @@ mod tests {
                 cwd: listed.clone(),
                 selection: Some("b.txt".into()),
                 frequents: Vec::new(),
+                theme: None,
             }
         );
 
@@ -1147,6 +1149,7 @@ mod tests {
             cwd: listed.clone(),
             selection: Some("a.txt".into()),
             frequents: Vec::new(),
+            theme: None,
         };
         engine.persist(next.clone());
         let deadline = Instant::now() + Duration::from_secs(5);

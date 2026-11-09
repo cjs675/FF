@@ -133,10 +133,18 @@ pub struct FfShell {
 
 impl FfShell {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (config, config_warnings) = match cfg::default_path().and_then(|p| std::fs::read_to_string(p).ok()) {
+        let (mut config, config_warnings) = match cfg::default_path().and_then(|p| std::fs::read_to_string(p).ok()) {
             Some(contents) => cfg::parse(&contents),
             None => (Config::default(), Vec::new()),
         };
+
+        // If a previously saved session stored a user-picked theme, honor it:
+        if let Some(session_path) = session::default_path()
+            && let Some(saved) = session::load(&session_path)
+            && let Some(theme) = saved.theme
+        {
+            config.theme = theme;
+        }
 
         let palette = theme::palette_for(&config.theme, cc.egui_ctx.system_theme());
         theme::setup_fonts(&cc.egui_ctx);
@@ -613,6 +621,7 @@ impl FfShell {
                 cwd: self.cwd.clone(),
                 selection: self.anchor.clone(),
                 frequents: self.frequents.clone(),
+                theme: Some(self.config.theme.clone()),
             };
             let _ = session::save(path, &state);
         }
@@ -859,6 +868,11 @@ impl eframe::App for FfShell {
                 && !i.modifiers.shift
                 && (i.key_pressed(Key::K) || i.key_pressed(Key::P))
         });
+        let theme_picker_toggle = ctx.input(|i| {
+            (i.modifiers.command || i.modifiers.ctrl)
+                && i.modifiers.shift
+                && i.key_pressed(Key::P)
+        });
 
         let mouse_back = ctx.input(|i| {
             i.pointer.button_clicked(PointerButton::Extra1)
@@ -893,6 +907,16 @@ impl eframe::App for FfShell {
                 self.frequents_selection = 0;
                 self.frequents_filter.clear();
                 self.frequents_focus_filter = true;
+            }
+        } else if theme_picker_toggle {
+            if self.launcher.open && self.launcher.mode == crate::launcher::LauncherMode::Themes {
+                if let Some(initial) = self.launcher.initial_theme.take() {
+                    self.palette = crate::theme::palette_for(&initial, None);
+                    crate::theme::apply(&ctx, self.palette);
+                }
+                self.launcher.open = false;
+            } else {
+                self.launcher.open_mode(crate::launcher::LauncherMode::Themes, Some(&self.config.theme));
             }
         } else if launcher_toggle {
             self.launcher.toggle();
@@ -1187,6 +1211,7 @@ impl eframe::App for FfShell {
             cwd: self.cwd.clone(),
             selection: self.display.get(self.selection).map(|e| e.name.clone()),
             frequents: self.frequents.clone(),
+            theme: Some(self.config.theme.clone()),
         };
         if self.last_saved.as_ref() != Some(&current) {
             self.scanner.persist(current.clone());
@@ -1923,6 +1948,10 @@ impl eframe::App for FfShell {
             let mut req_peek = |path: &Path| {
                 scanner.request_peek(path.to_path_buf());
             };
+            let mut previewed_theme_id: Option<&'static str> = None;
+            let mut preview_theme = |theme_id: &'static str| {
+                previewed_theme_id = Some(theme_id);
+            };
             let outcome = self.launcher.render(
                 &ctx,
                 &self.cwd,
@@ -1931,8 +1960,26 @@ impl eframe::App for FfShell {
                 &self.config.theme,
                 &mut req_content,
                 &mut req_peek,
+                &mut preview_theme,
             );
+            if let Some(theme_id) = previewed_theme_id {
+                let next_palette = crate::theme::palette_for(theme_id, None);
+                if self.palette != next_palette {
+                    self.palette = next_palette;
+                    crate::theme::apply(&ctx, self.palette);
+                }
+            }
             match outcome {
+                LauncherOutcome::ApplyTheme(theme_id) => {
+                    self.config.theme = theme_id.to_string();
+                    self.palette = crate::theme::palette_for(theme_id, None);
+                    crate::theme::apply(&ctx, self.palette);
+                    self.save_session();
+                    self.status_toast = Some((
+                        format!("Theme: {}", theme_id),
+                        Instant::now() + Duration::from_secs(2),
+                    ));
+                }
                 LauncherOutcome::OpenPath(path) => {
                     if path.is_dir() {
                         self.navigate_to(path);
@@ -1944,6 +1991,9 @@ impl eframe::App for FfShell {
                     }
                 }
                 LauncherOutcome::ExecuteAction(id) => match id {
+                    "theme_picker" => {
+                        self.launcher.open_mode(crate::launcher::LauncherMode::Themes, Some(&self.config.theme));
+                    }
                     "new_file" => {
                         self.file_op_modal = Some(FileOpModal::NewFile {
                             parent: self.cwd.clone(),
@@ -1986,9 +2036,18 @@ impl eframe::App for FfShell {
                         self.preview_open = !self.preview_open;
                     }
                     "cycle_theme" => {
-                        let next = if self.palette.is_dark { "braun" } else { "gruvbox-dark" };
-                        self.palette = crate::theme::palette_for(next, None);
+                        let all = crate::theme::all_themes();
+                        let current_idx = all.iter().position(|t| t.id == self.config.theme).unwrap_or(0);
+                        let next_idx = (current_idx + 1) % all.len();
+                        let next = all[next_idx].id;
                         self.config.theme = next.to_string();
+                        self.palette = crate::theme::palette_for(next, None);
+                        crate::theme::apply(&ctx, self.palette);
+                        self.save_session();
+                        self.status_toast = Some((
+                            format!("Theme: {}", next),
+                            Instant::now() + Duration::from_secs(2),
+                        ));
                     }
                     "copy_path" => {
                         if let Some(entry) = self.display.get(self.selection) {
@@ -2010,6 +2069,10 @@ impl eframe::App for FfShell {
                     _ => {}
                 },
                 LauncherOutcome::Close => {
+                    if let Some(initial) = self.launcher.initial_theme.take() {
+                        self.palette = crate::theme::palette_for(&initial, None);
+                        crate::theme::apply(&ctx, self.palette);
+                    }
                     self.launcher.open = false;
                 }
                 LauncherOutcome::None => {}
@@ -2102,6 +2165,7 @@ mod tests {
                 count: 1,
                 last_visited: 1000,
             }],
+            theme: Some("gruvbox-dark".to_string()),
         };
 
         shell.apply_restore(state.clone());

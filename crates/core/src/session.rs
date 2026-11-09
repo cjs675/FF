@@ -87,6 +87,7 @@ pub struct SessionState {
     pub cwd: PathBuf,
     pub selection: Option<String>,
     pub frequents: Vec<FrequentEntry>,
+    pub theme: Option<String>,
 }
 
 pub fn default_state() -> SessionState {
@@ -94,6 +95,7 @@ pub fn default_state() -> SessionState {
         cwd: home_dir(),
         selection: None,
         frequents: Vec::new(),
+        theme: None,
     }
 }
 
@@ -173,6 +175,11 @@ impl SessionState {
             out.push_str(&esc(selection));
             out.push('\n');
         }
+        if let Some(theme) = &self.theme {
+            out.push_str("theme = ");
+            out.push_str(&esc(theme));
+            out.push('\n');
+        }
         for freq in &self.frequents {
             out.push_str("frequent = ");
             out.push_str(&format!(
@@ -193,6 +200,7 @@ pub fn parse(text: &str) -> Option<SessionState> {
     let mut cwd: Option<PathBuf> = None;
     let mut selection: Option<String> = None;
     let mut frequents: Vec<FrequentEntry> = Vec::new();
+    let mut theme: Option<String> = None;
 
     for line in text.lines() {
         let line = line.trim();
@@ -212,6 +220,12 @@ pub fn parse(text: &str) -> Option<SessionState> {
                 let value = unesc(raw_val);
                 if !value.is_empty() {
                     selection = Some(value);
+                }
+            }
+            "theme" => {
+                let value = unesc(raw_val);
+                if !value.is_empty() {
+                    theme = Some(value);
                 }
             }
             "frequent" => {
@@ -238,6 +252,7 @@ pub fn parse(text: &str) -> Option<SessionState> {
         cwd,
         selection,
         frequents,
+        theme,
     })
 }
 
@@ -279,6 +294,7 @@ mod tests {
                     last_visited: 1700000000,
                 },
             ],
+            theme: Some("tokyo-night".to_string()),
         };
         assert_eq!(parse(&state.encode()), Some(state));
     }
@@ -289,6 +305,7 @@ mod tests {
             cwd: PathBuf::from("/x"),
             selection: None,
             frequents: Vec::new(),
+            theme: None,
         };
         assert_eq!(parse(&bare.encode()), Some(bare));
         assert_eq!(parse("selection = only\n"), None); // cwd is mandatory
@@ -314,6 +331,7 @@ mod tests {
                 count: 3,
                 last_visited: 1234567,
             }],
+            theme: Some("catppuccin-mocha".to_string()),
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), Some(state));
