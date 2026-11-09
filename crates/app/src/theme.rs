@@ -411,14 +411,20 @@ pub fn setup_fonts(ctx: &Context) {
         ))),
     );
 
-    // Prioritize JetBrainsMono for monospace
+    // Prioritize JetBrainsMono for BOTH Monospace and Proportional so all text across the app is purely monospace & uniform
     fonts
         .families
         .entry(egui::FontFamily::Monospace)
         .or_default()
         .insert(0, "JetBrainsMono-Regular".to_owned());
 
-    // Primary proportional font: high-legibility system font (macOS SFNS/Helvetica, Windows Segoe UI, Linux DejaVu)
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "JetBrainsMono-Regular".to_owned());
+
+    // Fallback system fonts for proportional (behind JetBrainsMono)
     #[cfg(target_os = "macos")]
     let primary_proportional = [
         ("/System/Library/Fonts/SFNS.ttf", "SFNS"),
@@ -445,7 +451,7 @@ pub fn setup_fonts(ctx: &Context) {
                 .families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
-                .insert(0, name.to_owned());
+                .push(name.to_owned());
             break;
         }
     }
@@ -585,7 +591,7 @@ mod tests {
         setup_fonts(&ctx);
         let mut output = ctx.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.label(egui::RichText::new("Crisp and clean text").font(egui::FontId::proportional(13.0)));
+                ui.label(egui::RichText::new("Crisp and clean text").font(egui::FontId::monospace(13.0)));
             });
         });
         output.textures_delta.clear();

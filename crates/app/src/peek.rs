@@ -561,7 +561,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     " ",
                     0.0,
                     TextFormat {
-                        font_id: egui::FontId::proportional(13.0),
+                        font_id: egui::FontId::monospace(13.0),
                         color: palette.fg,
                         line_height: Some(18.0),
                         ..Default::default()
@@ -573,7 +573,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     "\n",
                     0.0,
                     TextFormat {
-                        font_id: egui::FontId::proportional(13.0),
+                        font_id: egui::FontId::monospace(13.0),
                         color: palette.fg,
                         line_height: Some(18.0),
                         ..Default::default()
@@ -615,7 +615,7 @@ pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
                     };
 
                     let line_height = Some(font_size * 1.35);
-                    let font_id = egui::FontId::proportional(font_size);
+                    let font_id = egui::FontId::monospace(font_size);
                     current_job.append(
                         &text,
                         0.0,

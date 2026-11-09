@@ -495,13 +495,13 @@ impl FfShell {
                         egui::pos2(rect.min.x + 8.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         display_name,
-                        egui::FontId::proportional(13.0),
+                        egui::FontId::monospace(13.0),
                         self.palette.accent,
                     );
 
                     if show_path {
                         let path_w = (width - 150.0 - right_margin - 8.0).max(20.0);
-                        let path_budget = (path_w / 7.0) as usize;
+                        let path_budget = (path_w / 7.2) as usize;
                         let path_display = truncate_middle(&full_path, path_budget.max(10));
                         let path_clip = egui::Rect::from_min_max(
                             egui::pos2(rect.min.x + 150.0, rect.min.y),
@@ -511,7 +511,7 @@ impl FfShell {
                             egui::pos2(rect.min.x + 150.0, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             path_display,
-                            egui::FontId::proportional(12.0),
+                            egui::FontId::monospace(11.5),
                             self.palette.muted,
                         );
                     }
@@ -1548,7 +1548,7 @@ impl eframe::App for FfShell {
                             egui::pos2(rect.min.x + 8.0, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             display_name,
-                            egui::FontId::proportional(13.0),
+                            egui::FontId::monospace(12.5),
                             name_color,
                         );
 
@@ -1582,7 +1582,7 @@ impl eframe::App for FfShell {
                                 egui::pos2(rect.max.x - 12.0, rect.center().y),
                                 egui::Align2::RIGHT_CENTER,
                                 date_str,
-                                egui::FontId::proportional(11.0),
+                                egui::FontId::monospace(11.0),
                                 self.palette.muted,
                             );
                         }
@@ -1770,7 +1770,7 @@ impl eframe::App for FfShell {
                                         egui::pos2(rect.min.x + 8.0, rect.center().y),
                                         egui::Align2::LEFT_CENTER,
                                         &app.name,
-                                        egui::FontId::proportional(12.0),
+                                        egui::FontId::monospace(12.0),
                                         self.palette.fg,
                                     );
 
@@ -1779,7 +1779,7 @@ impl eframe::App for FfShell {
                                             egui::pos2(rect.max.x - 8.0, rect.center().y),
                                             egui::Align2::RIGHT_CENTER,
                                             "(default)",
-                                            egui::FontId::proportional(11.0),
+                                            egui::FontId::monospace(10.5),
                                             self.palette.muted,
                                         );
                                     }
@@ -1864,7 +1864,7 @@ impl eframe::App for FfShell {
 
                     let edit = egui::TextEdit::singleline(input_ref)
                         .hint_text(placeholder)
-                        .font(egui::FontId::proportional(13.0))
+                        .font(egui::FontId::monospace(13.0))
                         .text_color(self.palette.fg)
                         .margin(egui::Margin::symmetric(8, 6));
 
