@@ -472,9 +472,9 @@ mod tests {
 
     #[test]
     fn enumeration_finds_openers_for_known_extension() {
-        let plan_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../PLAN.md");
-        if plan_path.exists() {
-            let apps = enumerate_openers(&plan_path);
+        let md_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        if md_path.exists() {
+            let apps = enumerate_openers(&md_path);
             #[cfg(target_os = "macos")]
             assert!(!apps.is_empty(), "expected openers for markdown file on macOS");
             if let Some(first) = apps.first() {
