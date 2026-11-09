@@ -114,6 +114,7 @@ FF/
 - [x] **Provenance attestation.** Resolved (it7): `fsearch` is third-party MIT OSS, not user-owned — vendored-dependency treatment, isolated behind the `Find` trait, authorship not required.
 - [x] **Performance gate.** Resolved (it18): benchmark harness `crates/core/benches/find_gate.rs` verified `fsearch` vs `PortableFilter`. In-memory directory filtering (10,000 entries): 128.5 µs (4.0x faster than portable substring 505.3 µs, with full SIMD fuzzy scoring and ranking). Whole-tree search across 2,060,211 indexed disk entries: 0.176 ms median lookup vs 31.5 ms unindexed local walk (179.5x speedup, delta RSS +9.75 MB), confirming README claims.
 - [x] **Icon/font sourcing.** Locked (it17): Bundled `JetBrains Mono` under SIL Open Font License 1.1 with CJK/non-Latin system fallback font chain (`PingFang`, `Hiragino Sans`, `Arial`, `MS YaHei`, `Noto Sans CJK`). Curated Lucide vector icon assets under ISC license.
+- [x] **Remote repository.** Green-lit and pushed to `https://github.com/cjs675/FF.git` on branch `main`.
 
 ## 8. Config sketch (target shape)
 
