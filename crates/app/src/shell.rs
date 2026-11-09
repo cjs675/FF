@@ -113,6 +113,8 @@ pub struct FfShell {
     vim_pending_g: bool,
     /// Whether the in-window Peek preview pane is open.
     pub preview_open: bool,
+    pub peek_show_diff: bool,
+    pub miller_mode: bool,
     /// Active path inspected for peek preview.
     peek_path: Option<PathBuf>,
     /// Active peek payload delivered by the worker.
@@ -197,6 +199,7 @@ impl FfShell {
         };
 
         let preview_open = config.preview;
+        let miller_mode = config.view != "flat";
 
         Self {
             config,
@@ -231,6 +234,8 @@ impl FfShell {
             vim_count: None,
             vim_pending_g: false,
             preview_open,
+            peek_show_diff: false,
+            miller_mode,
             peek_path: None,
             peek_payload: None,
             peek_loading: false,
@@ -1180,6 +1185,20 @@ impl eframe::App for FfShell {
                     self.vim_count = None;
                     self.vim_pending_g = false;
                     self.enter_selected();
+                } else if pressed(Key::Tab) && self.preview_open {
+                    self.peek_show_diff = !self.peek_show_diff;
+                } else if no_modifiers && pressed(Key::M) {
+                    self.vim_count = None;
+                    self.vim_pending_g = false;
+                    self.miller_mode = !self.miller_mode;
+                    self.status_toast = Some((
+                        if self.miller_mode {
+                            "Miller columns: ON".to_string()
+                        } else {
+                            "Miller columns: OFF".to_string()
+                        },
+                        Instant::now() + Duration::from_secs(2),
+                    ));
                 } else if no_modifiers && pressed(Key::E) {
                     self.vim_count = None;
                     self.vim_pending_g = false;
@@ -1470,6 +1489,7 @@ impl eframe::App for FfShell {
                                     palette: &self.palette,
                                     theme_name: &self.config.theme,
                                     syntax_enabled: self.config.preview_syntax,
+                                    show_diff: self.peek_show_diff,
                                 };
                                 view.show(ui);
                             } else {
@@ -1484,6 +1504,106 @@ impl eframe::App for FfShell {
                             }
                         });
                 });
+        }
+
+        // --- left: Parent directory column for Miller columns (when enabled and width >= 750px)
+        let show_parent_column = self.miller_mode
+            && !self.frequents_open
+            && ctx.viewport_rect().width() >= 750.0
+            && self.cwd.parent().is_some();
+
+        if show_parent_column {
+            let parent_dir = self.cwd.parent().unwrap().to_path_buf();
+            let parent_entries = self.scanner.cached_entries(&parent_dir);
+            let border_color = self.palette.border;
+            let mut navigate_to_sibling = None;
+
+            Panel::left("parent_pane")
+                .resizable(true)
+                .default_size(180.0)
+                .min_size(130.0)
+                .max_size(260.0)
+                .show_separator_line(false)
+                .frame(egui::Frame::NONE.fill(self.palette.bg))
+                .show(ui, |ui| {
+                    let rect = ui.max_rect();
+                    if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                        self.pointer_over_interactive |= rect.contains(pos);
+                    }
+                    ui.painter().line_segment(
+                        [rect.right_top(), rect.right_bottom()],
+                        egui::Stroke::new(1.0, border_color),
+                    );
+
+                    let row_height = ui.spacing().interact_size.y;
+
+                    ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if let Some(entries) = &parent_entries {
+                                for entry in entries {
+                                    let is_active_cwd = entry.path == self.cwd;
+                                    let (row_rect, resp) = ui.allocate_exact_size(
+                                        egui::vec2(ui.available_width(), row_height),
+                                        egui::Sense::click(),
+                                    );
+                                    self.pointer_over_interactive |= resp.hovered();
+
+                                    if is_active_cwd {
+                                        ui.painter().rect_filled(row_rect, 0.0, self.palette.sel);
+                                    }
+
+                                    let div_rect = egui::Rect::from_min_max(
+                                        egui::pos2(row_rect.min.x, row_rect.max.y - 1.0),
+                                        row_rect.right_bottom(),
+                                    );
+                                    ui.painter().rect_filled(div_rect, 0.0, self.palette.border);
+
+                                    let icon = if is_active_cwd { "▸ " } else { "  " };
+                                    let text_color = if is_active_cwd {
+                                        self.palette.accent
+                                    } else if entry.is_dir() {
+                                        self.palette.muted
+                                    } else {
+                                        self.palette.border
+                                    };
+
+                                    let max_name_chars = ((row_rect.width() - 20.0) / 7.2) as usize;
+                                    let display_name = if entry.name.chars().count() > max_name_chars {
+                                        truncate_middle(&entry.name, max_name_chars.max(6))
+                                    } else {
+                                        entry.name.clone()
+                                    };
+
+                                    ui.painter().text(
+                                        egui::pos2(row_rect.min.x + 6.0, row_rect.center().y),
+                                        egui::Align2::LEFT_CENTER,
+                                        format!("{icon}{display_name}"),
+                                        egui::FontId::monospace(12.0),
+                                        text_color,
+                                    );
+
+                                    if resp.clicked() && entry.is_dir() && !is_active_cwd {
+                                        navigate_to_sibling = Some(entry.path.clone());
+                                    }
+                                }
+                            } else {
+                                ui.add_space(20.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        RichText::new("...")
+                                            .monospace()
+                                            .size(11.0)
+                                            .color(self.palette.muted),
+                                    );
+                                });
+                            }
+                        });
+                });
+
+            if let Some(target) = navigate_to_sibling {
+                self.navigate_to(target);
+            }
         }
 
         CentralPanel::default().show(ui, |ui| {
@@ -1549,6 +1669,32 @@ impl eframe::App for FfShell {
                             ui.painter().rect_filled(rect, 0.0, self.palette.sel);
                         }
 
+                        let git_statuses = self.scanner.git_file_statuses();
+                        let has_git = !git_statuses.is_empty();
+                        let gutter_w = if has_git { 16.0 } else { 0.0 };
+
+                        if has_git
+                            && let Some(status) = git_statuses.get(&entry.path)
+                        {
+                            let (badge, color) = match status {
+                                ff_core::model::FileGitStatus::Modified => ("M", self.palette.amber),
+                                ff_core::model::FileGitStatus::Staged => ("A", self.palette.green),
+                                ff_core::model::FileGitStatus::Untracked => ("?", self.palette.green),
+                                ff_core::model::FileGitStatus::Deleted => ("D", self.palette.accent),
+                                ff_core::model::FileGitStatus::Renamed => ("R", self.palette.amber),
+                                ff_core::model::FileGitStatus::Ignored => ("", self.palette.muted),
+                            };
+                            if !badge.is_empty() {
+                                ui.painter().text(
+                                    egui::pos2(rect.min.x + 8.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    badge,
+                                    egui::FontId::monospace(11.0),
+                                    color,
+                                );
+                            }
+                        }
+
                         let width = rect.width();
                         let (show_date, show_size, right_margin) = if width >= 440.0 {
                             (true, true, 210.0)
@@ -1558,7 +1704,7 @@ impl eframe::App for FfShell {
                             (false, false, 8.0)
                         };
 
-                        let max_name_w = (width - right_margin - 12.0).max(20.0);
+                        let max_name_w = (width - right_margin - 12.0 - gutter_w).max(20.0);
                         let char_budget = (max_name_w / 7.2) as usize;
                         let display_name = if entry.name.chars().count() > char_budget {
                             truncate_middle(&entry.name, char_budget.max(6))
@@ -1568,16 +1714,18 @@ impl eframe::App for FfShell {
 
                         let clip_rect = egui::Rect::from_min_max(
                             rect.min,
-                            egui::pos2(rect.min.x + 8.0 + max_name_w, rect.max.y),
+                            egui::pos2(rect.min.x + 8.0 + gutter_w + max_name_w, rect.max.y),
                         );
 
-                        let name_color = if entry.is_dir() {
+                        let name_color = if let Some(ff_core::model::FileGitStatus::Ignored) = git_statuses.get(&entry.path) {
+                            self.palette.muted
+                        } else if entry.is_dir() {
                             self.palette.accent
                         } else {
                             self.palette.fg
                         };
                         ui.painter().with_clip_rect(clip_rect).text(
-                            egui::pos2(rect.min.x + 8.0, rect.center().y),
+                            egui::pos2(rect.min.x + 8.0 + gutter_w, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             display_name,
                             egui::FontId::monospace(12.5),
@@ -2098,6 +2246,17 @@ impl eframe::App for FfShell {
                     "toggle_peek" => {
                         self.preview_open = !self.preview_open;
                     }
+                    "toggle_miller" => {
+                        self.miller_mode = !self.miller_mode;
+                        self.status_toast = Some((
+                            if self.miller_mode {
+                                "Miller columns: ON".to_string()
+                            } else {
+                                "Miller columns: OFF".to_string()
+                            },
+                            Instant::now() + Duration::from_secs(2),
+                        ));
+                    }
                     "cycle_theme" => {
                         let all = crate::theme::all_themes();
                         let current_idx = all.iter().position(|t| t.id == self.config.theme).unwrap_or(0);
@@ -2211,6 +2370,8 @@ mod tests {
             vim_count: None,
             vim_pending_g: false,
             preview_open: false,
+            peek_show_diff: false,
+            miller_mode: false,
             peek_path: None,
             peek_payload: None,
             peek_loading: false,
@@ -2276,6 +2437,8 @@ mod tests {
             vim_count: None,
             vim_pending_g: false,
             preview_open: false,
+            peek_show_diff: false,
+            miller_mode: false,
             peek_path: None,
             peek_payload: None,
             peek_loading: false,
@@ -2368,6 +2531,8 @@ mod tests {
             vim_count: None,
             vim_pending_g: false,
             preview_open: false,
+            peek_show_diff: false,
+            miller_mode: false,
             peek_path: None,
             peek_payload: None,
             peek_loading: false,
@@ -2455,6 +2620,8 @@ mod tests {
             vim_count: None,
             vim_pending_g: false,
             preview_open: false,
+            peek_show_diff: false,
+            miller_mode: false,
             peek_path: None,
             peek_payload: None,
             peek_loading: false,

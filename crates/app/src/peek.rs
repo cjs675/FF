@@ -42,6 +42,7 @@ pub struct PeekView<'a> {
     pub palette: &'a Palette,
     pub theme_name: &'a str,
     pub syntax_enabled: bool,
+    pub show_diff: bool,
 }
 
 impl<'a> PeekView<'a> {
@@ -89,6 +90,7 @@ impl<'a> PeekView<'a> {
                     content,
                     total_size,
                     truncated,
+                    git_diff,
                 } => {
                     let size_str = ff_core::model::EntryStats {
                         size: *total_size,
@@ -102,7 +104,9 @@ impl<'a> PeekView<'a> {
                         .and_then(|e| e.to_str())
                         .unwrap_or("")
                         .to_lowercase();
-                    let syntax_name = if matches!(ext.as_str(), "md" | "markdown" | "mdown" | "mkdn") {
+                    let syntax_name = if self.show_diff && git_diff.is_some() {
+                        "Git Diff".to_string()
+                    } else if matches!(ext.as_str(), "md" | "markdown" | "mdown" | "mkdn") {
                         "Markdown".to_string()
                     } else {
                         let ss = get_syntax_set();
@@ -116,13 +120,22 @@ impl<'a> PeekView<'a> {
                                 }
                             })
                     };
+                    let diff_hint = if git_diff.is_some() {
+                        if self.show_diff {
+                            "  ·  [Tab: File]"
+                        } else {
+                            "  ·  [Tab: Diff]"
+                        }
+                    } else {
+                        ""
+                    };
                     let hint = if *truncated {
                         Some("(head 128 KB)")
                     } else {
                         None
                     };
                     (
-                        format!("{line_count} lines  ·  {size_str}  ·  {syntax_name}"),
+                        format!("{line_count} lines  ·  {size_str}  ·  {syntax_name}{diff_hint}"),
                         hint,
                     )
                 }
@@ -219,21 +232,59 @@ impl<'a> PeekView<'a> {
                     );
                 });
             }
-            PeekPayload::Directory { mtime_secs, .. } => {
+            PeekPayload::Directory {
+                count,
+                size,
+                mtime_secs,
+                preview_entries,
+            } => {
+                let size_str = ff_core::model::EntryStats {
+                    size: *size,
+                    mtime_secs: 0,
+                }
+                .format_size();
                 let mtime_str = ff_core::model::EntryStats {
                     size: 0,
                     mtime_secs: *mtime_secs,
                 }
                 .format_mtime();
-                ui.add_space(12.0);
-                ui.vertical_centered(|ui| {
+
+                ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(format!("Modified: {mtime_str}"))
+                        RichText::new(format!("{count} items · {size_str} · Modified: {mtime_str}"))
                             .monospace()
-                            .size(11.0)
+                            .size(10.5)
                             .color(self.palette.muted),
                     );
                 });
+                ui.add_space(6.0);
+
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 2.0;
+                        for entry in preview_entries {
+                            let (icon, color) = if entry.is_dir() {
+                                ("▸ ", self.palette.accent)
+                            } else {
+                                ("  ", self.palette.fg)
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon).monospace().size(11.0).color(color));
+                                ui.label(RichText::new(&entry.name).monospace().size(11.5).color(color));
+                            });
+                        }
+                        if *count > preview_entries.len() {
+                            ui.add_space(4.0);
+                            let remaining = count - preview_entries.len();
+                            ui.label(
+                                RichText::new(format!("+ {remaining} more items..."))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(self.palette.muted),
+                            );
+                        }
+                    });
             }
             PeekPayload::Image {
                 width,
@@ -275,7 +326,12 @@ impl<'a> PeekView<'a> {
                     });
                 }
             }
-            PeekPayload::FileText { content, .. } => {
+            PeekPayload::FileText { content, git_diff, .. } => {
+                if self.show_diff && let Some(diff) = git_diff {
+                    render_diff(ui, diff, self.palette);
+                    return;
+                }
+
                 let ext = self
                     .path
                     .extension()
@@ -409,6 +465,48 @@ impl<'a> PeekView<'a> {
 }
 
 /// Renders parsed Markdown with clean typography conforming to Dieter Rams & Braun Minimalist System.
+fn render_diff(ui: &mut Ui, diff: &str, palette: &Palette) {
+    ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            for line in diff.lines() {
+                let (fg_color, bg_opt) = if line.starts_with("+++") || line.starts_with("---") {
+                    (palette.muted, None)
+                } else if line.starts_with('+') {
+                    (palette.green, Some(palette.green.gamma_multiply(0.12)))
+                } else if line.starts_with('-') {
+                    (palette.accent, Some(palette.accent.gamma_multiply(0.12)))
+                } else if line.starts_with("@@") {
+                    (palette.amber, Some(palette.amber.gamma_multiply(0.08)))
+                } else if line.starts_with("diff") || line.starts_with("index") {
+                    (palette.muted, None)
+                } else {
+                    (palette.fg, None)
+                };
+
+                if let Some(bg) = bg_opt {
+                    ui.horizontal(|ui| {
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width().max(400.0), 16.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(rect, 1.0, bg);
+                        ui.painter().text(
+                            egui::pos2(rect.min.x + 4.0, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            line,
+                            egui::FontId::monospace(11.5),
+                            fg_color,
+                        );
+                    });
+                } else {
+                    ui.label(RichText::new(line).monospace().size(11.5).color(fg_color));
+                }
+            }
+        });
+}
+
 pub fn render_markdown(ui: &mut Ui, content: &str, palette: &Palette) {
     use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 

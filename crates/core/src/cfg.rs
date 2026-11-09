@@ -26,6 +26,7 @@ pub struct Config {
     pub content: String,
     pub launch: Launch,
     pub show_hidden: bool,
+    pub view: String,
     pub keybinds: Vec<(String, String)>,
     pub openers: Vec<(String, String)>,
 }
@@ -40,6 +41,7 @@ impl Default for Config {
             content: "auto".into(),
             launch: Launch::Session,
             show_hidden: false,
+            view: "miller".into(),
             keybinds: Vec::new(),
             openers: Vec::new(),
         }
@@ -127,6 +129,10 @@ pub fn parse(src: &str) -> (Config, Vec<String>) {
                 "true" => cfg.show_hidden = true,
                 "false" => cfg.show_hidden = false,
                 _ => warnings.push(format!("line {line_no}: `show_hidden` wants true|false, got `{value}`")),
+            },
+            "view" => match value {
+                "miller" | "flat" => cfg.view = value.to_string(),
+                _ => warnings.push(format!("line {line_no}: `view` wants miller|flat, got `{value}`")),
             },
             "keybind" => match value.split_once('=') {
                 Some((combo, action)) => cfg

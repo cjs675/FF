@@ -95,6 +95,12 @@ impl LauncherAction {
                 shortcut: "Space",
             },
             LauncherAction {
+                id: "toggle_miller",
+                title: "Toggle Miller Columns View",
+                category: "View",
+                shortcut: "m",
+            },
+            LauncherAction {
                 id: "cycle_theme",
                 title: "Cycle Palette Theme",
                 category: "Appearance",
@@ -1116,6 +1122,7 @@ impl LauncherState {
                                                 palette,
                                                 theme_name,
                                                 syntax_enabled: true,
+                                                show_diff: false,
                                             };
                                             peek_view.show(ui);
                                         } else {

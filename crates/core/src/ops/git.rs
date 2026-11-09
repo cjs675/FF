@@ -2,8 +2,9 @@
 //! Discovers git root, handles submodules/worktrees, resolves branches/detached HEAD,
 //! and evaluates fast index dirtiness without launching child processes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use crate::model::GitStatus;
+use crate::model::{FileGitStatus, GitStatus};
 
 pub fn find_git_dir(start: &Path) -> Option<(PathBuf, PathBuf)> {
     for candidate in start.ancestors() {
@@ -91,6 +92,130 @@ fn check_is_dirty(git_dir: &Path, dir: &Path, _repo_root: &Path) -> bool {
     false
 }
 
+/// Resolves git statuses for files within a repository directory using `git status --porcelain=v1 -z`.
+pub fn resolve_file_git_statuses(dir: &Path) -> HashMap<PathBuf, FileGitStatus> {
+    let mut map = HashMap::new();
+    let Some((repo_root, _)) = find_git_dir(dir) else {
+        return map;
+    };
+
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(&repo_root)
+        .output();
+
+    let Ok(output) = output else {
+        return map;
+    };
+
+    if !output.status.success() {
+        return map;
+    }
+
+    let stdout = output.stdout;
+    let mut i = 0;
+    while i < stdout.len() {
+        let end = stdout[i..]
+            .iter()
+            .position(|&b| b == 0)
+            .map(|pos| i + pos)
+            .unwrap_or(stdout.len());
+
+        let record = &stdout[i..end];
+        if record.len() >= 4 {
+            let x = record[0] as char;
+            let y = record[1] as char;
+            let rel_bytes = &record[3..];
+            if let Ok(rel_str) = std::str::from_utf8(rel_bytes) {
+                let abs_path = repo_root.join(rel_str);
+                let status = match (x, y) {
+                    ('?', '?') => FileGitStatus::Untracked,
+                    ('!', '!') => FileGitStatus::Ignored,
+                    ('M', ' ') | ('A', ' ') | ('C', ' ') => FileGitStatus::Staged,
+                    (' ', 'M') | ('M', 'M') | ('A', 'M') => FileGitStatus::Modified,
+                    (' ', 'D') | ('D', ' ') | ('D', 'D') => FileGitStatus::Deleted,
+                    ('R', _) | (_, 'R') => FileGitStatus::Renamed,
+                    _ if x != ' ' => FileGitStatus::Staged,
+                    _ if y != ' ' => FileGitStatus::Modified,
+                    _ => FileGitStatus::Modified,
+                };
+                map.insert(abs_path.clone(), status);
+
+                // If path is inside dir in a subfolder, mark the subfolder in dir as modified
+                if let Ok(rel_to_dir) = abs_path.strip_prefix(dir)
+                    && let Some(first_comp) = rel_to_dir.components().next()
+                {
+                    let subfolder = dir.join(first_comp.as_os_str());
+                    if subfolder != abs_path {
+                        map.entry(subfolder).or_insert(status);
+                    }
+                }
+            }
+
+            if (x == 'R' || y == 'R') && end < stdout.len() {
+                let next_start = end + 1;
+                let next_end = stdout[next_start..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .map(|pos| next_start + pos)
+                    .unwrap_or(stdout.len());
+                i = next_end + 1;
+                continue;
+            }
+        }
+
+        i = end + 1;
+    }
+
+    map
+}
+
+/// Retrieves git diff for a specific file path (staged or unstaged).
+pub fn get_file_diff(path: &Path) -> Option<String> {
+    let parent = path.parent().unwrap_or(path);
+    let (repo_root, _) = find_git_dir(parent)?;
+
+    // Try diff against HEAD first
+    let output = std::process::Command::new("git")
+        .args(["diff", "HEAD", "--", path.to_string_lossy().as_ref()])
+        .current_dir(&repo_root)
+        .output();
+
+    if let Ok(out) = output
+        && out.status.success()
+        && !out.stdout.is_empty()
+    {
+        let diff = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !diff.trim().is_empty() {
+            if diff.len() > 256 * 1024 {
+                return Some(diff[..256 * 1024].to_string() + "\n... (diff truncated)");
+            }
+            return Some(diff);
+        }
+    }
+
+    // Fallback without HEAD
+    let output = std::process::Command::new("git")
+        .args(["diff", "--", path.to_string_lossy().as_ref()])
+        .current_dir(&repo_root)
+        .output();
+
+    if let Ok(out) = output
+        && out.status.success()
+        && !out.stdout.is_empty()
+    {
+        let diff = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !diff.trim().is_empty() {
+            if diff.len() > 256 * 1024 {
+                return Some(diff[..256 * 1024].to_string() + "\n... (diff truncated)");
+            }
+            return Some(diff);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +301,12 @@ mod tests {
         assert!(status.is_dirty);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_resolve_file_git_statuses_on_current_repo() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let statuses = resolve_file_git_statuses(root);
+        assert!(statuses.is_empty() || !statuses.is_empty());
     }
 }

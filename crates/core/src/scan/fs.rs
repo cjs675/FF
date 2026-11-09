@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use super::{DirSource, Listing, sort_entries};
-use crate::model::{AppOpener, Entry, EntryKind, EntryStats, GitStatus};
+use crate::model::{AppOpener, Entry, EntryKind, EntryStats, FileGitStatus, GitStatus};
 use crate::session::{self, SessionState};
 
 /// Paint this many entries immediately, unsorted, while the rest reads.
@@ -176,6 +176,7 @@ pub(crate) enum ScanEvent {
     Git {
         ticket: u64,
         status: Option<GitStatus>,
+        file_statuses: Arc<HashMap<PathBuf, FileGitStatus>>,
     },
     /// Watcher initialization or registration failed.
     WatchDegraded {
@@ -494,8 +495,17 @@ fn spawn_worker(
                         Work::GitStatus { ticket, dir } => {
                             if ticket == current_ticket.load(Ordering::Relaxed) {
                                 let status = crate::ops::git::resolve_git_status(&dir);
+                                let file_statuses = if status.is_some() {
+                                    crate::ops::git::resolve_file_git_statuses(&dir)
+                                } else {
+                                    HashMap::new()
+                                };
                                 if current_ticket.load(Ordering::Relaxed) == ticket {
-                                    let _ = send_event(ScanEvent::Git { ticket, status });
+                                    let _ = send_event(ScanEvent::Git {
+                                        ticket,
+                                        status,
+                                        file_statuses: Arc::new(file_statuses),
+                                    });
                                 }
                             }
                         }
@@ -623,6 +633,8 @@ pub struct FsEngine {
     dir_size: Option<u64>,
     /// Off-thread git repository branch and dirty status.
     git_status: Option<GitStatus>,
+    /// Off-thread git status per file path.
+    git_file_statuses: Arc<HashMap<PathBuf, FileGitStatus>>,
     /// Off-thread Peek preview result (ticket, path, payload).
     pending_peek: Option<(u64, PathBuf, crate::ops::peek::PeekPayload)>,
     /// Off-thread file operation results delivered from the worker.
@@ -691,6 +703,7 @@ impl FsEngine {
             pending_openers: None,
             dir_size: None,
             git_status: None,
+            git_file_statuses: Arc::new(HashMap::new()),
             pending_peek: None,
             pending_file_ops: Vec::new(),
             pending_content_search: None,
@@ -708,6 +721,14 @@ impl FsEngine {
 
     pub fn git_status(&self) -> Option<&GitStatus> {
         self.git_status.as_ref()
+    }
+
+    pub fn git_file_statuses(&self) -> Arc<HashMap<PathBuf, FileGitStatus>> {
+        Arc::clone(&self.git_file_statuses)
+    }
+
+    pub fn cached_entries(&self, dir: &Path) -> Option<Vec<Entry>> {
+        self.cache.get(dir).cloned()
     }
 
     pub fn watcher_state(&self) -> WatcherState {
@@ -875,8 +896,9 @@ impl DirSource for FsEngine {
                 ScanEvent::DirSize { ticket, total_bytes } if ticket == self.ticket => {
                     self.dir_size = Some(total_bytes);
                 }
-                ScanEvent::Git { ticket, status } if ticket == self.ticket => {
+                ScanEvent::Git { ticket, status, file_statuses } if ticket == self.ticket => {
                     self.git_status = status;
+                    self.git_file_statuses = file_statuses;
                 }
                 ScanEvent::WatchDegraded { dir } if dir == self.live_dir => {
                     self.watcher_state = WatcherState::Degraded;
@@ -920,7 +942,13 @@ impl DirSource for FsEngine {
             self.pending_peek = None;
             self.dir_size = None;
             self.git_status = None;
+            self.git_file_statuses = Arc::new(HashMap::new());
             self.watcher_state = WatcherState::Active;
+            if let Some(parent) = dir.parent() {
+                let _ = self.work_tx.send(Work::Warm {
+                    dir: parent.to_path_buf(),
+                });
+            }
             let _ = self.work_tx.send(Work::Watch {
                 dir: dir.to_path_buf(),
             });

@@ -32,6 +32,16 @@ pub struct GitStatus {
     pub is_dirty: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileGitStatus {
+    Modified,
+    Staged,
+    Untracked,
+    Deleted,
+    Renamed,
+    Ignored,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppOpener {
     pub name: String,

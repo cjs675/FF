@@ -24,11 +24,13 @@ pub enum PeekPayload {
         count: usize,
         size: u64,
         mtime_secs: i64,
+        preview_entries: Vec<crate::model::Entry>,
     },
     FileText {
         content: String,
         total_size: u64,
         truncated: bool,
+        git_diff: Option<String>,
     },
     Image {
         width: u32,
@@ -57,9 +59,23 @@ pub fn load_peek(path: &Path) -> PeekPayload {
     if metadata.is_dir() {
         let mut count = 0;
         let mut size = 0;
+        let mut preview_entries = Vec::new();
         if let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 count += 1;
+                let ft = entry.file_type().ok();
+                let kind = match ft {
+                    Some(t) if t.is_dir() => crate::model::EntryKind::Dir,
+                    Some(t) if t.is_symlink() => crate::model::EntryKind::Symlink,
+                    _ => crate::model::EntryKind::File,
+                };
+                if preview_entries.len() < 32 {
+                    preview_entries.push(crate::model::Entry {
+                        name: entry.file_name().to_string_lossy().into_owned(),
+                        path: entry.path(),
+                        kind,
+                    });
+                }
                 if let Ok(meta) = entry.metadata()
                     && meta.is_file()
                 {
@@ -67,6 +83,7 @@ pub fn load_peek(path: &Path) -> PeekPayload {
                 }
             }
         }
+        crate::scan::sort_entries(&mut preview_entries);
         let mtime_secs = metadata
             .modified()
             .ok()
@@ -77,6 +94,7 @@ pub fn load_peek(path: &Path) -> PeekPayload {
             count,
             size,
             mtime_secs,
+            preview_entries,
         };
     }
 
@@ -129,11 +147,13 @@ pub fn load_peek(path: &Path) -> PeekPayload {
 
     let truncated = total_size > buffer.len() as u64;
     let content = String::from_utf8_lossy(&buffer).into_owned();
+    let git_diff = crate::ops::git::get_file_diff(path);
 
     PeekPayload::FileText {
         content,
         total_size,
         truncated,
+        git_diff,
     }
 }
 
@@ -152,7 +172,7 @@ mod tests {
 
         let payload = load_peek(&file_path);
         match payload {
-            PeekPayload::FileText { content, total_size, truncated } => {
+            PeekPayload::FileText { content, total_size, truncated, .. } => {
                 assert!(content.contains("fn main()"));
                 assert!(!truncated);
                 assert!(total_size > 0);
@@ -192,9 +212,10 @@ mod tests {
 
         let payload = load_peek(&temp_dir);
         match payload {
-            PeekPayload::Directory { count, size, .. } => {
+            PeekPayload::Directory { count, size, preview_entries, .. } => {
                 assert_eq!(count, 1);
                 assert!(size > 0);
+                assert_eq!(preview_entries.len(), 1);
             }
             other => panic!("expected Directory, got {:?}", other),
         }
